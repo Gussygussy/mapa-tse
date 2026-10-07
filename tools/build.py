@@ -9,7 +9,7 @@ A pasta bruta deve conter:
   csv/   zips do Portal de Dados Abertos do TSE:
          votacao_candidato_munzona_2026.zip, votacao_secao_2026_BR.zip,
          votacao_secao_2026_<UF>.zip, detalhe_votacao_secao_2026.zip,
-         eleitorado_local_votacao_2026.zip,
+         eleitorado_local_votacao_2026.zip (coordenadas dos locais, para as áreas das zonas),
          detalhe_votacao_munzona_2022.zip, votacao_partido_munzona_2022.zip
 """
 import csv
@@ -180,9 +180,15 @@ SEC_V = cached('secao_votos', load_secao_votes)
 print('secoes com votos', len(SEC_V))
 
 # ------------------------------------------------ votos por município (CSV)
+def zid(uf, z):
+    """id da zona eleitoral (numeração por UF)"""
+    return f'z{uf}{int(z):04d}'
+
+
 def load_munzona():
-    """mun -> cargo -> sq -> votos (cargos estaduais)"""
+    """mun -> cargo -> sq -> votos e zona -> cargo -> sq -> votos (cargos estaduais)"""
     mv = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    zv = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     party = {}
     for uf in UFS:
         for r in rows('votacao_candidato_munzona_2026.zip', f'votacao_candidato_munzona_2026_{uf.upper()}.csv'):
@@ -190,25 +196,34 @@ def load_munzona():
                 continue
             mun = r['CD_MUNICIPIO'].zfill(5)
             mv[mun][int(r['CD_CARGO'])][r['SQ_CANDIDATO']] += n(r['QT_VOTOS_NOMINAIS'])
+            zv[zid(uf, r['NR_ZONA'])][int(r['CD_CARGO'])][r['SQ_CANDIDATO']] += n(r['QT_VOTOS_NOMINAIS'])
             party[r['SQ_CANDIDATO']] = r['SG_PARTIDO']
         print('  munzona', uf)
-    return {m: {c: dict(v) for c, v in d.items()} for m, d in mv.items()}, party
+    flat = lambda x: {m: {c: dict(v) for c, v in d.items()} for m, d in x.items()}
+    return flat(mv), party, flat(zv)
 
 
-MUN_V, CSV_PARTY = cached('munzona', load_munzona)
+MUN_V, CSV_PARTY, ZONE_V = cached('munzona2', load_munzona)
 
-# Presidente por município: soma das seções
+# Presidente e totais por município e por zona: soma das seções
 MUN_PRES = defaultdict(lambda: defaultdict(int))
+ZONE_PRES = defaultdict(lambda: defaultdict(int))
 MUN_T = defaultdict(lambda: defaultdict(lambda: [0, 0, 0, 0, 0]))
+ZONE_T = defaultdict(lambda: defaultdict(lambda: [0, 0, 0, 0, 0]))
+ZONE_MUNS = defaultdict(set)
 for (uf, mun, z, s), d in SEC_V.items():
     if 1 in d:
         for num, v in d[1].items():
             MUN_PRES[mun][num] += v
+            if uf != 'zz':
+                ZONE_PRES[zid(uf, z)][num] += v
 for (uf, mun, z, s), d in SEC_T.items():
+    if uf != 'zz':
+        ZONE_MUNS[zid(uf, z)].add(mun)
     for cg, t in d.items():
-        acc = MUN_T[mun][cg]
-        for i in range(5):
-            acc[i] += t[i]
+        for acc in (MUN_T[mun][cg], ZONE_T[zid(uf, z)][cg] if uf != 'zz' else [0] * 5):
+            for i in range(5):
+                acc[i] += t[i]
 
 # ------------------------------------------------------------- 2022
 def load_2022():
@@ -220,7 +235,7 @@ def load_2022():
         key = 'zz' if uf == 'zz' else r['CD_MUNICIPIO'].zfill(5)
         vals = [n(r['QT_APTOS']), n(r['QT_COMPARECIMENTO']), n(r['QT_TOTAL_VOTOS_VALIDOS']),
                 n(r['QT_VOTOS_BRANCOS']), n(r['QT_TOTAL_VOTOS_NULOS'])]
-        for k in (key, uf, 'br') if uf != 'zz' else ('zz', 'br'):
+        for k in (key, uf, 'br', zid(uf, r['NR_ZONA'])) if uf != 'zz' else ('zz', 'br'):
             for i in range(5):
                 t[k][i] += vals[i]
     p = defaultdict(lambda: [0, 0])
@@ -230,12 +245,12 @@ def load_2022():
         uf = r['SG_UF'].lower()
         key = 'zz' if uf == 'zz' else r['CD_MUNICIPIO'].zfill(5)
         i = 0 if r['NR_PARTIDO'] == '13' else 1
-        for k in (key, uf, 'br') if uf != 'zz' else ('zz', 'br'):
+        for k in (key, uf, 'br', zid(uf, r['NR_ZONA'])) if uf != 'zz' else ('zz', 'br'):
             p[k][i] += n(r['QT_VOTOS_NOMINAIS_VALIDOS'])
     return dict(t), dict(p)
 
 
-T22, P22 = cached('ano2022', load_2022)
+T22, P22 = cached('ano2022z', load_2022)
 
 
 # ------------------------------------------------------ helpers de governador
@@ -309,14 +324,24 @@ for mun, info in MUNS.items():
     summary[mun]['ibge'] = info['ibge']
     dump(f'd/{mun}.json', {'c': {str(k): v for k, v in c.items()}})
 
-for scope, d in cands.items():
-    dump(f'cand/{scope}.json', d)
+# ------------------------------------------------------------ zonas eleitorais
+for z_id in sorted(ZONE_T):
+    uf = z_id[1:3]
+    c = {}
+    pv = sorted([[PRES_NUM[num], v] for num, v in ZONE_PRES.get(z_id, {}).items() if num in PRES_NUM],
+                key=lambda r: -r[1])
+    c[1] = {'t': ZONE_T[z_id][1], 'v': pv}
+    for cg in cargos_uf(uf):
+        votes = ZONE_V.get(z_id, {}).get(cg, {})
+        c[cg] = {'t': ZONE_T[z_id][cg], 'v': sorted([[sq, v] for sq, v in votes.items() if v > 0], key=lambda r: -r[1]),
+                 'nv': uf_detail[uf][cg]['nv']}
+    gov = gov_summary(c[3]['v'], c[3]['t'][2], cand_party(uf))
+    put(z_id, f'Zona {int(z_id[3:])}', uf, c[1], gov)
+    summary[z_id]['muns'] = sorted(ZONE_MUNS[z_id], key=lambda m: -MUN_T[m][1][0])
+    dump(f'd/{z_id}.json', {'c': {str(k): v for k, v in c.items()}})
+print('zonas', len(ZONE_T))
 
-dump('summary.json', {'el': summary, 'uf': {u: UF_NAMES[u] for u in UFS + ['zz']},
-                      'pt': PT_SQ, 'pl': PL_SQ})
-print('resumo ok', len(summary))
 
-# ------------------------------------------------------------ seções
 def load_locais():
     loc = {}
     z = zipfile.ZipFile(os.path.join(RAW, 'csv', 'eleitorado_local_votacao_2026.zip'))
@@ -338,15 +363,21 @@ def load_locais():
     return loc
 
 
-LOC = cached('locais', load_locais)
-print('locais', len(LOC))
+def build_zone_geometry():
+    """Área aproximada de cada zona: polígonos de Voronoi dos locais de votação de cada
+    município (cada local vai para a zona com mais seções nele), recortados pelo limite
+    do município e unidos por zona. Municípios com uma só zona entram inteiros."""
+    from collections import Counter
+    from shapely.geometry import MultiPoint, Point, Polygon, MultiPolygon, mapping
+    from shapely.geometry.polygon import orient
+    import shapely
+    from shapely.ops import unary_union
+    import topojson as tp
 
-# centróides de fallback via IBGE (topojson): média dos vértices do arco
-def mun_centroids():
+    LOC = cached('locais', load_locais)
     topo = json.load(open(os.path.join(RAW, 'raw', 'mun_int.topo.json')))
-    tr = topo['transform']
-    sx, sy = tr['scale']
-    tx, ty = tr['translate']
+    sx, sy = topo['transform']['scale']
+    tx, ty = topo['transform']['translate']
     arcs = []
     for arc in topo['arcs']:
         x = y = 0
@@ -356,89 +387,87 @@ def mun_centroids():
             y += dy
             pts.append((x * sx + tx, y * sy + ty))
         arcs.append(pts)
-    obj = list(topo['objects'].values())[0]
-    out = {}
-    for g in obj['geometries']:
+
+    def ring(idx):
+        out = []
+        for a in idx:
+            pts = arcs[a] if a >= 0 else arcs[~a][::-1]
+            out.extend(pts if not out else pts[1:])
+        return out
+
+    ibge2tse = {v['ibge']: k for k, v in MUNS.items()}
+    mun_poly = {}
+    for g in list(topo['objects'].values())[0]['geometries']:
         polys = g['arcs'] if g['type'] == 'MultiPolygon' else [g['arcs']]
-        xs = ys = cnt = 0
-        for poly in polys:
-            for ring in poly[:1]:
-                for a in ring:
-                    for x, y in arcs[a if a >= 0 else ~a]:
-                        xs += x
-                        ys += y
-                        cnt += 1
-        if cnt:
-            out[g['properties']['codarea']] = (ys / cnt, xs / cnt)
-    return out
+        shp = MultiPolygon([Polygon(ring(p[0]), [ring(h) for h in p[1:]]) for p in polys]).buffer(0)
+        tse = ibge2tse.get(g['properties']['codarea'])
+        if tse:
+            mun_poly[tse] = shp
 
-
-CENT = mun_centroids()
-
-# índices de candidatos por número para governador (por UF)
-GOV_NUM = {uf: {v[1]: (sq, v[2]) for sq, v in cands[uf].items() if v[4] == 3} for uf in UFS}
-
-by_uf = defaultdict(list)
-for k in SEC_T:
-    if k[0] != 'zz':
-        by_uf[k[0]].append(k)
-
-import random
-random.seed(1)
-for uf in UFS:
-    keys = sorted(by_uf[uf])
-    cols = {k: [] for k in ('m', 'z', 's', 'lat', 'lon', 'l', 'apt', 'comp', 'val', 'bra', 'nul',
-                            'pt', 'pl', 'gp', 'gm')}
-    locs, loc_idx, munl, mun_idx, parties, party_idx = [], {}, [], {}, [], {}
-    details = defaultdict(dict)
-    for k in keys:
-        _, mun, z, s = k
-        t = SEC_T[k].get(1) or SEC_T[k].get(3)
-        if t is None:
+    # seções por (município, zona) e locais com coordenadas
+    mun_zones = defaultdict(Counter)
+    places = defaultdict(lambda: defaultdict(Counter))   # mun -> (lon, lat) -> Counter(zona)
+    for (uf, mun, z, s) in SEC_T:
+        if uf == 'zz':
             continue
-        v = SEC_V.get(k, {})
-        lat, lon, lname, bairro = LOC.get(k, (None, None, '', ''))
-        if lat is None:
-            c = CENT.get(MUNS.get(mun, {}).get('ibge'))
-            if c is None:
-                continue
-            lat = c[0] + random.uniform(-0.01, 0.01)
-            lon = c[1] + random.uniform(-0.01, 0.01)
-        lk = (mun, lname, bairro)
-        if lk not in loc_idx:
-            loc_idx[lk] = len(locs)
-            locs.append(f'{lname} ({bairro})' if bairro else lname)
-        if mun not in mun_idx:
-            mun_idx[mun] = len(munl)
-            munl.append(mun)
-        pres = v.get(1, {})
-        gov = v.get(3, {})
-        gsorted = sorted([(vv, num) for num, vv in gov.items() if num in GOV_NUM[uf]], reverse=True)
-        gt = SEC_T[k].get(3, [0, 0, 0, 0, 0])
-        if gsorted and gsorted[0][0] > 0 and gt[2]:
-            p = GOV_NUM[uf][gsorted[0][1]][1]
-            if p not in party_idx:
-                party_idx[p] = len(parties)
-                parties.append(p)
-            gp = party_idx[p]
-            gm = round(1000 * (gsorted[0][0] - (gsorted[1][0] if len(gsorted) > 1 else 0)) / gt[2])
-        else:
-            gp, gm = -1, 0
-        row = {'m': mun_idx[mun], 'z': z, 's': s, 'lat': round(lat * 1e4), 'lon': round(lon * 1e4),
-               'l': loc_idx[lk], 'apt': t[0], 'comp': t[1], 'val': t[2], 'bra': t[3], 'nul': t[4],
-               'pt': pres.get('13', 0), 'pl': pres.get('22', 0), 'gp': gp, 'gm': gm}
-        for c_, val in row.items():
-            cols[c_].append(val)
-        # {cargo: [totais, {número: votos}]}; brancos/nulos (95/96/97) já estão nos totais
-        details[mun][f'{z}-{s}'] = {
-            str(cg): [SEC_T[k][cg], {num: vv for num, vv in v.get(cg, {}).items() if vv and num not in ('95', '96', '97')}]
-            for cg in (1, 3, 5) if SEC_T[k].get(cg)}
-    cols['locs'] = locs
-    cols['muns'] = munl
-    cols['parties'] = parties
-    dump(f's/{uf}.json', cols)
-    for mun, d in details.items():
-        dump(f'sd/{mun}.json', d)
-    print('  secoes', uf, len(cols['s']))
+        mun_zones[mun][zid(uf, z)] += 1
+        lat, lon, _, _ = LOC.get((uf, mun, z, s), (None, None, '', ''))
+        if lat is not None:
+            places[mun][(round(lon, 5), round(lat, 5))][zid(uf, z)] += 1
 
-print('fim')
+    pieces = defaultdict(list)
+    sem_geo = 0
+    for mun, zc in mun_zones.items():
+        poly = mun_poly.get(mun)
+        if poly is None:
+            continue
+        if len(zc) == 1:
+            pieces[next(iter(zc))].append(poly)
+            continue
+        near = poly.buffer(0.02)
+        pts, lab = [], []
+        for (x, y), cnt in places[mun].items():
+            if near.contains(Point(x, y)):
+                pts.append((x, y))
+                lab.append(cnt.most_common(1)[0][0])
+        if len(set(lab)) < 2:
+            # sem como separar: o município inteiro vai para a zona com mais seções
+            pieces[zc.most_common(1)[0][0]].append(poly)
+            sem_geo += len(zc) - 1
+            continue
+        cells = shapely.voronoi_polygons(MultiPoint(pts), extend_to=poly.envelope.buffer(0.2), ordered=True)
+        by_zone = defaultdict(list)
+        for cell, z in zip(cells.geoms, lab):
+            by_zone[z].append(cell)
+        for z, cs in by_zone.items():
+            part = unary_union(cs).intersection(poly)
+            if not part.is_empty:
+                pieces[z].append(part)
+        sem_geo += sum(1 for z in zc if z not in by_zone)
+    print('  zonas sem área própria em algum município:', sem_geo)
+
+    feats = []
+    for z, ps in pieces.items():
+        geom = unary_union(ps)
+        geom = geom if geom.geom_type in ('Polygon', 'MultiPolygon') else MultiPolygon(
+            [g for g in getattr(geom, 'geoms', []) if g.geom_type == 'Polygon'])
+        # d3-geo (esférico) espera o anel externo no sentido horário
+        geom = MultiPolygon([orient(g, sign=-1.0) for g in getattr(geom, 'geoms', [geom])])
+        feats.append({'type': 'Feature', 'properties': {'id': z}, 'geometry': mapping(geom)})
+    fc = {'type': 'FeatureCollection', 'features': feats}
+    topo_z = tp.Topology(fc, prequantize=1_000_000, toposimplify=0.0004, topology=True).to_dict()
+    # o pacote nomeia o objeto como 'data'
+    os.makedirs(os.path.join(OUT, 'geo'), exist_ok=True)
+    with open(os.path.join(OUT, 'geo', 'zonas.json'), 'w') as f:
+        json.dump(topo_z, f, separators=(',', ':'))
+    print('  geometria zonas', len(feats))
+
+
+build_zone_geometry()
+
+for scope, d in cands.items():
+    dump(f'cand/{scope}.json', d)
+
+dump('summary.json', {'el': summary, 'uf': {u: UF_NAMES[u] for u in UFS + ['zz']},
+                      'pt': PT_SQ, 'pl': PL_SQ})
+print('resumo ok', len(summary))

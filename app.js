@@ -97,7 +97,6 @@ const state = {
 };
 let S = null;          // summary.json
 let geo = {};          // features
-let sections = null;   // dados de seções carregados
 const cand = {};       // escopo -> dicionário de candidatos
 const detailCache = new Map();
 
@@ -120,10 +119,22 @@ function resize() {
   draw();
 }
 
+// d3-geo é esférico: um anel no sentido anti-horário vira "o globo menos o polígono".
+// Inverte qualquer polígono com área maior que meio globo.
+function rewind(f) {
+  const g = f.geometry;
+  if (!g) return;
+  const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+  for (const rings of polys) {
+    if (d3.geoArea({ type: 'Polygon', coordinates: rings }) > 2 * Math.PI) rings.forEach(r => r.reverse());
+  }
+}
+
 // ------------------------------------------------------------------ carga inicial
 async function init() {
-  const [summary, ufTopo, munTopo] = await Promise.all([
+  const [summary, ufTopo, munTopo, zonaTopo] = await Promise.all([
     fetchJSON('data/summary.json'), fetchJSON('data/geo/uf.json'), fetchJSON('data/geo/mun.json'),
+    fetchJSON('data/geo/zonas.json'),
   ]);
   S = summary;
   // IBGE -> TSE
@@ -137,6 +148,9 @@ async function init() {
   ufFeats.forEach(f => f.id = UF_IBGE[f.properties.codarea]);
   const munFeats = topojson.feature(munTopo, munObj).features;
   munFeats.forEach(f => f.id = ibge2tse[f.properties.codarea]);
+  const zonaObj = Object.values(zonaTopo.objects)[0];
+  const zonaFeats = topojson.feature(zonaTopo, zonaObj).features;
+  zonaFeats.forEach(f => { f.id = f.properties.id; rewind(f); });
   const brFeat = { type: 'Feature', id: 'br', geometry: topojson.merge(ufTopo, ufObj.geometries) };
   const ufMesh = topojson.mesh(ufTopo, ufObj, (a, b) => a !== b);
   const brOutline = topojson.mesh(ufTopo, ufObj, (a, b) => a === b);
@@ -163,6 +177,8 @@ async function init() {
   geo.exterior = exterior; geo.exLines = exLines;
   geo.estado = mk(ufFeats).concat(exterior);
   geo.municipio = mk(munFeats).concat(exterior);
+  geo.zona = mk(zonaFeats).concat(exterior);
+  geo.zonaMesh = new Path2D(); d3.geoPath(projection, geo.zonaMesh)(topojson.mesh(zonaTopo, zonaObj, (a, b) => a !== b));
   geo.ufMesh = new Path2D(); d3.geoPath(projection, geo.ufMesh)(ufMesh);
   geo.outline = new Path2D(); d3.geoPath(projection, geo.outline)(brOutline);
   geo.munMesh = new Path2D(); d3.geoPath(projection, geo.munMesh)(topojson.mesh(munTopo, munObj, (a, b) => a !== b));
@@ -235,15 +251,8 @@ function drawOverlay() {
   for (const [id, col, w] of [[state.hover, 'rgba(255,255,255,.8)', 1.5], [state.selected, '#fff', 2.5]]) {
     if (id == null) continue;
     octx.strokeStyle = col; octx.lineWidth = w * px;
-    if (id === 'zz') { octx.stroke(geo.exterior.path); continue; }
-    if (state.level === 'secao') {
-      if (typeof id !== 'number' || !sections) continue;
-      const [x, y] = sections.pos(id, t.k), r = sections.radius(t.k) * px;
-      octx.beginPath(); octx.arc(x, y, r + 1.5 * px, 0, 2 * Math.PI); octx.stroke();
-    } else {
-      const g = geo[state.level].find(f => f.id === id);
-      if (g) octx.stroke(g.path);
-    }
+    const g = geo[state.level].find(f => f.id === id);
+    if (g) octx.stroke(g.path);
   }
 }
 
@@ -251,16 +260,11 @@ function drawOverlay() {
 // Limites a partir dos dados do nível atual (percentis), nunca 0%/100% fixos.
 let scale = null;
 function currentElements() {
-  if (state.level === 'secao') return null;
   const ids = state.level === 'pais' ? ['br'] : geo[state.level].map(g => g.id);
   return ids.map(id => [id, S.el[id]]).filter(([, e]) => e);
 }
 function metricValues() {
   const m = METRIC[state.metric];
-  if (state.level === 'secao') {
-    if (!sections) return [];
-    return sections.values(m);
-  }
   return currentElements().map(([, e]) => m.get(e)).filter(v => v != null && isFinite(v));
 }
 
@@ -313,8 +317,7 @@ function updateScale() {
     const l = d3.scaleLinear().domain([0, hi]).clamp(true);
     sc.colorFor = (party, margin) => d3.interpolateRgb(GOV_BASE, partyColor(party))(0.3 + 0.7 * l(margin));
     sc.hi = hi;
-    sc.parties = state.level === 'secao' ? (sections ? sections.govParties() : [])
-      : [...new Set(currentElements().map(([, e]) => e.g && e.g[0]).filter(Boolean))];
+    sc.parties = [...new Set(currentElements().map(([, e]) => e.g && e.g[0]).filter(Boolean))];
   }
   scale = sc;
   renderLegend();
@@ -363,29 +366,24 @@ function draw() {
   const vx0 = -t.x / t.k, vy0 = -t.y / t.k, vx1 = (W - t.x) / t.k, vy1 = (H - t.y) / t.k;
   const visible = b => !(b[2] < vx0 || b[0] > vx1 || b[3] < vy0 || b[1] > vy1);
 
-  if (state.level === 'secao') {
-    for (const g of geo.estado) { ctx.fillStyle = '#1b2029'; ctx.fill(g.path); }
-    // contorno dos municípios (mais visível conforme o zoom aumenta)
-    ctx.strokeStyle = `rgba(255,255,255,${Math.min(0.38, 0.17 + 0.035 * Math.log2(Math.max(1, t.k)))})`;
-    ctx.lineWidth = 0.6 * px; ctx.stroke(geo.munMesh);
-    if (sections) sections.draw(ctx, t, px, [vx0, vy0, vx1, vy1]);
-    ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.ufMesh);
-    ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.stroke(geo.outline);
-  } else {
-    const feats = geo[state.level];
-    for (const g of feats) {
-      if (!visible(g.bbox)) continue;
-      ctx.fillStyle = colorOf(S.el[g.id]);
-      ctx.fill(g.path);
-    }
-    if (state.level === 'municipio') {
-      ctx.strokeStyle = 'rgba(14,17,22,.55)'; ctx.lineWidth = 0.5 * px; ctx.stroke(geo.munMesh);
-      ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.4 * px; ctx.stroke(geo.ufMesh);
-    } else if (state.level === 'estado') {
-      ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.2 * px; ctx.stroke(geo.ufMesh);
-    }
-    ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.outline);
+  const feats = geo[state.level];
+  for (const g of feats) {
+    if (!visible(g.bbox)) continue;
+    ctx.fillStyle = colorOf(S.el[g.id]);
+    ctx.fill(g.path);
   }
+  if (state.level === 'zona') {
+    // divisória bem clara entre municípios dentro da mesma zona; bordas das zonas por cima
+    ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 0.5 * px; ctx.stroke(geo.munMesh);
+    ctx.strokeStyle = 'rgba(14,17,22,.8)'; ctx.lineWidth = 0.7 * px; ctx.stroke(geo.zonaMesh);
+    ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.4 * px; ctx.stroke(geo.ufMesh);
+  } else if (state.level === 'municipio') {
+    ctx.strokeStyle = 'rgba(14,17,22,.55)'; ctx.lineWidth = 0.5 * px; ctx.stroke(geo.munMesh);
+    ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.4 * px; ctx.stroke(geo.ufMesh);
+  } else if (state.level === 'estado') {
+    ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.2 * px; ctx.stroke(geo.ufMesh);
+  }
+  ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.outline);
   if (state.level !== 'pais') drawExterior(ctx, px);
   snapCtx.setTransform(1, 0, 0, 1, 0, 0);
   snapCtx.clearRect(0, 0, snap.width, snap.height);
@@ -397,7 +395,6 @@ function draw() {
 
 function drawExterior(c, px) {
   const ex = geo.exterior;
-  if (state.level === 'secao') { c.fillStyle = colorOf(S.el.zz); c.fill(ex.path); }
   c.strokeStyle = 'rgba(14,17,22,.55)'; c.lineWidth = 1.2 * px; c.stroke(geo.exLines);
   c.strokeStyle = 'rgba(255,255,255,.45)'; c.lineWidth = 1.2 * px; c.stroke(ex.path);
   const fs = Math.max(13 * px, 9);  // cresce com o zoom até o tamanho natural no mapa
@@ -406,119 +403,6 @@ function drawExterior(c, px) {
   c.fillText('Exterior', ex.ex.cx, ex.ex.cy + ex.ex.r + 6 * Math.min(px, 1));
 }
 
-// ------------------------------------------------------------------ seções
-// Pontos por seção eleitoral (coordenadas do local de votação).
-async function loadSections() {
-  if (sections) return sections;
-  const ufs = Object.keys(S.uf).filter(u => u !== 'zz');
-  let done = 0;
-  $('#loading').hidden = false;
-  $('#loading-text').textContent = `Carregando seções… 0/${ufs.length}`;
-  const parts = await Promise.all(ufs.map(uf => fetchJSON(`data/s/${uf}.json`).then(d => {
-    done++; $('#loading-text').textContent = `Carregando seções… ${done}/${ufs.length}`; d.uf = uf; return d;
-  })));
-  $('#loading').hidden = true;
-  // achatar em typed arrays
-  const N = parts.reduce((a, p) => a + p.s.length, 0);
-  const X = new Float32Array(N), Y = new Float32Array(N);
-  const cols = ['apt', 'comp', 'val', 'bra', 'nul', 'pt', 'pl', 'gm'];
-  const A = Object.fromEntries(cols.map(c => [c, new Int32Array(N)]));
-  const GP = new Array(N), REF = new Int32Array(N), PART = new Uint8Array(N);
-  let i = 0;
-  parts.forEach((p, pi) => {
-    for (let j = 0; j < p.s.length; j++, i++) {
-      const [x, y] = projection([p.lon[j] / 1e4, p.lat[j] / 1e4]);
-      X[i] = x; Y[i] = y;
-      for (const c of cols) A[c][i] = p[c][j];
-      GP[i] = p.gp[j] >= 0 ? p.parties[p.gp[j]] : null;
-      REF[i] = j; PART[i] = pi;
-    }
-  });
-  // seções no mesmo local de votação: deslocamento em "girassol" (em múltiplos do raio do ponto),
-  // aplicado em pixels de tela no zoom alto para que cada seção apareça separada
-  const OX = new Float32Array(N), OY = new Float32Array(N);
-  const groups = new Map();
-  for (let k = 0; k < N; k++) {
-    const key = X[k] + ',' + Y[k];
-    let g = groups.get(key); if (!g) groups.set(key, g = []); g.push(k);
-  }
-  for (const g of groups.values()) {
-    if (g.length < 2) continue;
-    g.forEach((k, n) => {
-      const rr = Math.sqrt(n) * 1.15, a = n * 2.39996;
-      OX[k] = rr * Math.cos(a); OY[k] = rr * Math.sin(a);
-    });
-  }
-  // fator de espalhamento (em px por unidade de deslocamento) conforme o zoom
-  const spread = (k, rPx) => 2 * rPx * Math.min(1, Math.max(0, (k - 20) / 180));
-  const radiusPx = k => Math.min(7, 0.9 + Math.log2(Math.max(1, k)) * 0.75);
-  // grade espacial para hover
-  const CELL = 2;
-  const grid = new Map();
-  for (let k = 0; k < N; k++) {
-    const key = Math.floor(X[k] / CELL) + ',' + Math.floor(Y[k] / CELL);
-    let arr = grid.get(key); if (!arr) grid.set(key, arr = []); arr.push(k);
-  }
-  const elemOf = k => ({
-    t26: [A.apt[k], A.comp[k], A.val[k], A.bra[k], A.nul[k]], t22: null,
-    p26: [A.pt[k], A.pl[k]], p22: null, g: GP[k] ? [GP[k], A.gm[k] / 1000] : null,
-  });
-  sections = {
-    N, X, Y, parts, PART, REF,
-    elem: elemOf,
-    values(m) { const out = []; for (let k = 0; k < N; k++) { const v = m.get(elemOf(k)); if (v != null && isFinite(v)) out.push(v); } return out; },
-    govParties() { return [...new Set(GP.filter(Boolean))]; },
-    info(k) {
-      const p = parts[PART[k]], j = REF[k];
-      const mun = p.muns[p.m[j]];
-      return { uf: p.uf, mun, z: p.z[j], s: p.s[j], loc: p.locs[p.l[j]], munName: S.el[mun] ? S.el[mun].n : mun };
-    },
-    colors: null,
-    recolor() {
-      const cs = new Array(N);
-      for (let k = 0; k < N; k++) cs[k] = colorOf(elemOf(k));
-      // agrupa índices por cor para desenhar em lote
-      const by = new Map();
-      for (let k = 0; k < N; k++) { let a = by.get(cs[k]); if (!a) by.set(cs[k], a = []); a.push(k); }
-      this.colors = by;
-    },
-    draw(c, t, px, view) {
-      if (!this.colors) this.recolor();
-      // raio em pixels de tela cresce suavemente com o zoom
-      const rPx = radiusPx(t.k);
-      const r = rPx * px, sp = spread(t.k, rPx) * px, small = rPx < 2.5;
-      const [vx0, vy0, vx1, vy1] = view;
-      for (const [col, idx] of this.colors) {
-        c.fillStyle = col;
-        c.beginPath();
-        for (const k of idx) {
-          const x = X[k] + OX[k] * sp, y = Y[k] + OY[k] * sp;
-          if (x < vx0 || x > vx1 || y < vy0 || y > vy1) continue;
-          // abaixo de ~2,5 px o círculo é indistinguível de um quadrado e o quadrado é bem mais rápido
-          if (small) c.rect(x - r, y - r, 2 * r, 2 * r); else { c.moveTo(x + r, y); c.arc(x, y, r, 0, 2 * Math.PI); }
-        }
-        c.fill();
-      }
-    },
-    radius: radiusPx,
-    pos(k, zk) {
-      const sp = spread(zk, radiusPx(zk)) / zk;
-      return [X[k] + OX[k] * sp, Y[k] + OY[k] * sp];
-    },
-    nearest(mx, my, maxDist, zk) {
-      let best = -1, bd = maxDist * maxDist;
-      const sp = spread(zk, radiusPx(zk)) / zk;
-      const r = Math.ceil(maxDist / CELL) + 1;
-      const cx = Math.floor(mx / CELL), cy = Math.floor(my / CELL);
-      for (let gx = cx - r; gx <= cx + r; gx++) for (let gy = cy - r; gy <= cy + r; gy++) {
-        const arr = grid.get(gx + ',' + gy); if (!arr) continue;
-        for (const k of arr) { const d = (X[k] + OX[k] * sp - mx) ** 2 + (Y[k] + OY[k] * sp - my) ** 2; if (d < bd) { bd = d; best = k; } }
-      }
-      return best;
-    },
-  };
-  return sections;
-}
 
 // ------------------------------------------------------------------ hit test
 function pick(mx, my) {
@@ -527,12 +411,6 @@ function pick(mx, my) {
   if (state.level !== 'pais') {
     const e = geo.exterior.ex;
     if ((x - e.cx) ** 2 + (y - e.cy) ** 2 <= e.r ** 2) return 'zz';
-  }
-  if (state.level === 'secao') {
-    if (!sections) return null;
-    // raio de captura de ~8 px de tela
-    const k = sections.nearest(x, y, 8 / t.k, t.k);
-    return k >= 0 ? k : null;
   }
   const feats = geo[state.level];
   let best = null;
@@ -555,7 +433,7 @@ function metricText(e) {
     return `<b style="color:${partyColor(e.g[0])}">${esc(e.g[0])}</b> · margem ${fmtPct(e.g[1], 1)}`;
   }
   const v = m.get(e);
-  if (v == null || !isFinite(v)) return m.diff && state.level === 'secao' ? 'Sem comparação com 2022 por seção' : 'Sem dados';
+  if (v == null || !isFinite(v)) return m.diff ? 'Sem dados de 2022' : 'Sem dados';
   switch (m.kind) {
     case 'abs': return `<b>${fmtInt.format(v)}</b>`;
     case 'pct': return `<b>${fmtPct(v)}</b>`;
@@ -566,15 +444,17 @@ function metricText(e) {
   }
   return '';
 }
+function zoneMuns(e, max = 3) {
+  const ns = e.muns.map(m => titleCase(S.el[m] ? S.el[m].n : m));
+  return ns.length > max ? ns.slice(0, max).join(', ') + ` +${ns.length - max}` : ns.join(', ');
+}
 function showTooltip(mx, my, id) {
-  let name, sub, e;
-  if (state.level === 'secao' && typeof id === 'number') {
-    const inf = sections.info(id);
-    name = `Seção ${inf.s} · Zona ${inf.z}`;
-    sub = `${titleCase(inf.loc || '')} — ${titleCase(inf.munName)} (${inf.uf.toUpperCase()})`;
-    e = sections.elem(id);
+  const e = S.el[id];
+  let name, sub;
+  if (e && e.muns) {
+    name = e.n;
+    sub = `${zoneMuns(e)} (${e.uf.toUpperCase()})`;
   } else {
-    e = S.el[id];
     name = id === 'br' ? 'Brasil' : id === 'zz' ? 'Exterior' : titleCase(e ? e.n : id);
     sub = e && e.uf && e.uf !== id && id !== 'br' ? e.uf.toUpperCase() : '';
   }
@@ -607,14 +487,11 @@ function buildMapmodes() {
 function syncMapmodes() {
   document.querySelectorAll('.mm-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.metric === state.metric);
-    b.disabled = state.level === 'secao' && METRIC[b.dataset.metric].diff;
-    if (b.disabled) b.title = METRIC[b.dataset.metric].name + ' (indisponível por seção)';
-    else b.title = METRIC[b.dataset.metric].name;
+    b.title = METRIC[b.dataset.metric].name;
   });
 }
 function setMetric(id) {
   state.metric = id;
-  if (sections) sections.colors = null;
   syncMapmodes(); updateScale(); draw();
 }
 async function setLevel(lv) {
@@ -623,11 +500,6 @@ async function setLevel(lv) {
   document.querySelectorAll('.levels button').forEach(b => b.classList.toggle('active', b.dataset.level === lv));
   state.hover = null;
   closePanel();
-  if (lv === 'secao') {
-    if (METRIC[state.metric].diff) state.metric = 'pres';
-    await loadSections();
-    sections.colors = null;
-  }
   syncMapmodes(); updateScale(); draw();
 }
 
@@ -664,11 +536,6 @@ async function loadDetail(id) {
   if (!detailCache.has(id)) detailCache.set(id, fetchJSON(`data/d/${id}.json`));
   return detailCache.get(id);
 }
-const secDetailCache = new Map();
-async function loadSecDetail(mun) {
-  if (!secDetailCache.has(mun)) secDetailCache.set(mun, fetchJSON(`data/sd/${mun}.json`));
-  return secDetailCache.get(mun);
-}
 
 function closePanel() {
   state.selected = null;
@@ -686,36 +553,18 @@ async function openPanel(id) {
   body.innerHTML = '<div class="empty">Carregando…</div>';
   let pc;   // contexto do painel
   try {
-    if (state.level === 'secao' && typeof id === 'number') {
-      const inf = sections.info(id);
-      const [sd] = await Promise.all([loadSecDetail(inf.mun), loadCand('br'), loadCand(inf.uf)]);
-      const d = sd[`${inf.z}-${inf.s}`];  // {cargo: [[aptos, comp, válidos, brancos, nulos], {número: votos}]}
-      $('#panel-sub').textContent = `${titleCase(inf.munName)} (${inf.uf.toUpperCase()}) · Zona ${inf.z}`;
-      $('#panel-title').textContent = `Seção ${inf.s}`;
-      // converter número -> sq
-      const byNum = (scope, cg) => {
-        const m = {}; for (const [sq, c] of Object.entries(cand[scope])) if (c[4] === cg) m[c[1]] = sq; return m;
-      };
-      const c = {};
-      for (const [cg, [t, v]] of Object.entries(d || {})) {
-        const map = byNum(cg === '1' ? 'br' : inf.uf, +cg);
-        c[cg] = { t, v: Object.entries(v).filter(([n]) => map[n]).map(([n, vv]) => [map[n], vv]).sort((a, b) => b[1] - a[1]) };
-      }
-      pc = { id, kind: 'secao', uf: inf.uf, detail: { c }, loc: inf.loc, tabs: [1, 3, 5] };
-    } else {
-      const e = S.el[id];
-      const detail = await loadDetail(id);
-      const uf = id === 'br' ? null : e.uf;
-      await Promise.all([loadCand('br'), uf && uf !== 'zz' ? loadCand(uf) : null,
-        id === 'br' ? Promise.all(Object.keys(S.uf).filter(u => u !== 'zz').map(loadCand)) : null]);
-      const kind = id === 'br' ? 'pais' : id === 'zz' ? 'exterior' : id.length === 2 ? 'estado' : 'municipio';
-      $('#panel-sub').textContent = kind === 'pais' ? 'País' : kind === 'exterior' ? 'Votos no exterior'
-        : kind === 'estado' ? 'Estado' : `Município · ${uf.toUpperCase()}`;
-      $('#panel-title').textContent = kind === 'pais' ? 'Brasil' : kind === 'exterior' ? 'Exterior'
-        : kind === 'estado' ? S.uf[id] : titleCase(e.n);
-      const tabs = kind === 'pais' ? [1, 3, 5, 6] : kind === 'exterior' ? [1] : [1, 3, 5, 6, 7];
-      pc = { id, kind, uf, detail, tabs };
-    }
+    const e = S.el[id];
+    const detail = await loadDetail(id);
+    const uf = id === 'br' ? null : e.uf;
+    await Promise.all([loadCand('br'), uf && uf !== 'zz' ? loadCand(uf) : null,
+      id === 'br' ? Promise.all(Object.keys(S.uf).filter(u => u !== 'zz').map(loadCand)) : null]);
+    const kind = id === 'br' ? 'pais' : id === 'zz' ? 'exterior' : id.length === 2 ? 'estado' : e.muns ? 'zona' : 'municipio';
+    $('#panel-sub').textContent = kind === 'pais' ? 'País' : kind === 'exterior' ? 'Votos no exterior'
+      : kind === 'estado' ? 'Estado' : kind === 'zona' ? `Zona eleitoral · ${S.uf[uf]}` : `Município · ${uf.toUpperCase()}`;
+    $('#panel-title').textContent = kind === 'pais' ? 'Brasil' : kind === 'exterior' ? 'Exterior'
+      : kind === 'estado' ? S.uf[id] : kind === 'zona' ? e.n : titleCase(e.n);
+    const tabs = kind === 'pais' ? [1, 3, 5, 6] : kind === 'exterior' ? [1] : [1, 3, 5, 6, 7];
+    pc = { id, kind, uf, detail, tabs, muns: kind === 'zona' ? zoneMuns(e, 12) : null };
   } catch (err) {
     body.innerHTML = `<div class="empty">Não foi possível carregar os dados (${esc(err.message)}).</div>`;
     return;
@@ -746,7 +595,7 @@ function renderPanel() {
   const tot = cg.t || (pc.detail.c['1'] || {}).t;
   const totCargo = cg.t ? (CARGOS.find(c => c.id === panelState.tab) || {}).nome : 'Presidente';
   let html = '';
-  if (pc.kind === 'secao' && pc.loc) html += `<div class="count" style="margin-top:-4px">${esc(titleCase(pc.loc))}</div>`;
+  if (pc.muns) html += `<div class="count" style="margin-top:-4px">${esc(pc.muns)}</div>`;
   if (tot) html += votacaoCard(tot, totCargo) + eleitoradoCard(tot);
   html += `<div class="tabs">${CARGOS.map(c => {
     const ok = pc.tabs.includes(c.id);
@@ -854,14 +703,6 @@ $('#panel-body').addEventListener('click', ev => {
 window.__mapaT = () => state.transform;
 window.__mapa = {
   redraw() { draw(); return lastDrawMs; },
-  sectionScreen(i) {
-    const t = state.transform, [x, y] = sections.pos(i, t.k);
-    return [x * t.k + t.x, y * t.k + t.y];
-  },
-  nearestSection(lon, lat) {
-    const [x, y] = projection([lon, lat]);
-    return sections.nearest(x, y, 5, state.transform.k);
-  },
   zoomTo(lon, lat, k) {
     const [x, y] = projection([lon, lat]);
     d3.select(canvas).call(zoom.transform, d3.zoomIdentity.translate(W / 2 - x * k, H / 2 - y * k).scale(k));
