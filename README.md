@@ -5,7 +5,7 @@ Mapa interativo (modo escuro) dos resultados do **1º turno das eleições gerai
 - **Níveis:** País, Estado, Município, Zona eleitoral e Seção.
   - Zona: o TSE não publica o desenho das zonas, então a área de cada zona é aproximada (polígonos de Voronoi dos locais de votação, recortados pelos limites dos municípios).
   - Seção: um ponto por local de votação; seções no mesmo local ficam agrupadas.
-  - O *Exterior* é um círculo no Atlântico. No nível Seção ele é dividido em bolhas, uma por cidade (área proporcional ao eleitorado), porque o TSE não publica coordenadas dos locais no exterior.
+  - O *Exterior* é um círculo no Atlântico. No nível Seção, o círculo some e cada local de votação no exterior aparece no próprio mapa, na posição real (o mapa mostra os países ao fundo e permite afastar o zoom até o mundo inteiro). O TSE não publica essas coordenadas; elas foram geocodificadas pelo endereço (`tools/geocode_exterior.py`).
 - **Ruas (OpenStreetMap):** contorno claro das ruas em todos os níveis (por cima das cores; no nível Seção, ao fundo), com opção para ligar/desligar no painel de filtros.
 - **Modos de mapa** (canto inferior esquerdo):
   - votos válidos e % de votos válidos sobre o eleitorado;

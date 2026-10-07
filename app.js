@@ -100,8 +100,8 @@ let geo = {};          // features
 const cand = {};       // escopo -> dicionário de candidatos
 const detailCache = new Map();
 let locais = null;     // pontos do nível Seção (um por local de votação)
-let extCities = null;  // nível Seção: locais do exterior como pontos num globo dentro do círculo (id 'x<n>')
-let extGlobe = null;   // { land, borders } em Path2D, na projeção do globo
+let extCities = null;  // nível Seção: locais do exterior como pontos no mapa (id "x<n>")
+let worldBase = null;  // nível Seção: países do mundo ao fundo { land, borders } em Path2D
 
 // ------------------------------------------------------------------ canvas
 const canvas = $('#map');
@@ -205,7 +205,7 @@ function fitView() {
   d3.select(canvas).call(zoom.transform, t);
 }
 function setupZoom() {
-  zoom = d3.zoom().scaleExtent([0.2, 6000])
+  zoom = d3.zoom().scaleExtent([0.06, 6000])
     .on('start', ev => { if (ev.sourceEvent && ev.sourceEvent.type === 'mousedown') canvas.classList.add('dragging'); })
     .on('zoom', ev => { state.transform = ev.transform; scheduleZoomDraw(); hideTooltip(); })
     .on('end', () => canvas.classList.remove('dragging'));
@@ -261,7 +261,7 @@ function drawOverlay() {
       continue;
     }
     if (typeof id === 'string' && id[0] === 'x' && extCities) {
-      const b = extCities.get(id), r = locais.radius(t.k) * px * 0.9;
+      const b = extCities.get(id), r = extRadius(t.k) * px;
       octx.beginPath(); octx.arc(b.x, b.y, r + 1.5 * px, 0, 2 * Math.PI); octx.stroke();
       continue;
     }
@@ -387,6 +387,10 @@ function draw() {
   const visible = b => !(b[2] < vx0 || b[0] > vx1 || b[3] < vy0 || b[1] > vy1);
 
   if (state.level === 'secao') {
+    if (worldBase) {
+      ctx.fillStyle = '#161a21'; ctx.fill(worldBase.land);
+      ctx.strokeStyle = 'rgba(255,255,255,.1)'; ctx.lineWidth = 0.6 * px; ctx.stroke(worldBase.borders);
+    }
     for (const g of geo.estado) { if (g.id !== 'zz') { ctx.fillStyle = '#1b2029'; ctx.fill(g.path); } }
     if (showStreets) drawTiles(ctx, t, [vx0, vy0, vx1, vy1]);
     // contorno dos municípios (mais visível conforme o zoom aumenta)
@@ -394,8 +398,7 @@ function draw() {
     ctx.lineWidth = 0.6 * px; ctx.stroke(geo.munMesh);
     if (locais) locais.draw(ctx, t, px, [vx0, vy0, vx1, vy1]);
     ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.ufMesh);
-    if (extCities) drawExtCities(ctx, t, px);
-    else { ctx.fillStyle = colorOf(S.el.zz); ctx.fill(geo.exterior.path); }
+    if (extCities) drawExtCities(ctx, t, px, [vx0, vy0, vx1, vy1]);
   }
   const feats = state.level === 'secao' ? [] : geo[state.level];
   for (const g of feats) {
@@ -417,7 +420,8 @@ function draw() {
     ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.2 * px; ctx.stroke(geo.ufMesh);
   }
   ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.outline);
-  if (state.level !== 'pais') drawExterior(ctx, px);
+  // no nível Seção o exterior aparece como pontos no mapa, sem o círculo
+  if (state.level !== 'pais' && !(state.level === 'secao' && extCities)) drawExterior(ctx, px);
   snapCtx.setTransform(1, 0, 0, 1, 0, 0);
   snapCtx.clearRect(0, 0, snap.width, snap.height);
   snapCtx.drawImage(canvas, 0, 0);
@@ -584,54 +588,43 @@ async function loadLocais() {
   return locais;
 }
 
-// Exterior no nível Seção: um globo (azimutal equidistante centrado no Brasil, o mundo inteiro
-// cabe no círculo) com um ponto por local de votação. O TSE não publica as coordenadas desses
-// locais; elas foram geocodificadas a partir dos endereços (tools/geocode_exterior.py).
+// Exterior no nível Seção: cada local de votação no exterior é um ponto na posição real, no
+// próprio mapa (mesma projeção), com os continentes ao fundo. O TSE não publica as coordenadas
+// desses locais; elas foram geocodificadas a partir dos endereços (tools/geocode_exterior.py).
 function buildExtCities(list, world) {
-  const ex = geo.exterior.ex;
-  const proj = d3.geoAzimuthalEquidistant().rotate([50, 15]).clipAngle(179.5)
-    .scale(ex.r * 0.97 / Math.PI).translate([ex.cx, ex.cy]);
   const obj = world.objects.countries;
-  const land = new Path2D(); d3.geoPath(proj, land)(topojson.feature(world, obj));
-  const borders = new Path2D(); d3.geoPath(proj, borders)(topojson.mesh(world, obj, (a, b) => a !== b));
-  extGlobe = { land, borders };
+  const land = new Path2D(); d3.geoPath(projection, land)(topojson.feature(world, obj));
+  const borders = new Path2D(); d3.geoPath(projection, borders)(topojson.mesh(world, obj, (a, b) => a !== b));
+  worldBase = { land, borders };
   extCities = new Map();
   list.forEach((p, i) => {
-    const [x, y] = proj([p.lon, p.lat]);
+    const [x, y] = projection([p.lon, p.lat]);
     const v = p.v;
     extCities.set('x' + i, { x, y, c: p, e: { t26: p.t, t22: null, p26: [v['13'] || 0, v['22'] || 0], p22: null, g: null } });
   });
 }
-function drawExtCities(c, t, px) {
-  const ex = geo.exterior;
-  c.save();
-  c.clip(ex.path);
-  c.fillStyle = '#10141a'; c.fill(ex.path);
-  c.fillStyle = '#232a35'; c.fill(extGlobe.land);
-  c.strokeStyle = 'rgba(255,255,255,.12)'; c.lineWidth = 0.5 * px; c.stroke(extGlobe.borders);
-  const r = locais.radius(t.k) * px * 0.9;
+// pontos do exterior são poucos e espalhados: tamanho mínimo de 3 px para serem achados
+const extRadius = k => Math.max(3, locais.radius(k));
+function drawExtCities(c, t, px, [vx0, vy0, vx1, vy1]) {
+  const r = extRadius(t.k) * px;
   for (const b of extCities.values()) {
+    if (b.x < vx0 || b.x > vx1 || b.y < vy0 || b.y > vy1) continue;
     c.beginPath(); c.arc(b.x, b.y, r, 0, 2 * Math.PI);
     c.fillStyle = colorOf(b.e); c.fill();
-    c.strokeStyle = 'rgba(14,17,22,.6)'; c.lineWidth = 0.5 * px; c.stroke();
   }
-  c.restore();
 }
 
 // ------------------------------------------------------------------ hit test
 function pick(mx, my) {
   const t = state.transform;
   const x = (mx - t.x) / t.k, y = (my - t.y) / t.k;
-  if (state.level !== 'pais') {
+  if (state.level === 'secao' && extCities) {
+    let best = null, bd = (8 / t.k) ** 2;
+    for (const [id, b] of extCities) { const d = (x - b.x) ** 2 + (y - b.y) ** 2; if (d < bd) { bd = d; best = id; } }
+    if (best) return best;
+  } else if (state.level !== 'pais') {
     const e = geo.exterior.ex;
-    if ((x - e.cx) ** 2 + (y - e.cy) ** 2 <= e.r ** 2) {
-      if (state.level === 'secao' && extCities) {
-        let best = null, bd = (8 / t.k) ** 2;
-        for (const [id, b] of extCities) { const d = (x - b.x) ** 2 + (y - b.y) ** 2; if (d < bd) { bd = d; best = id; } }
-        if (best) return best;
-      }
-      return 'zz';
-    }
+    if ((x - e.cx) ** 2 + (y - e.cy) ** 2 <= e.r ** 2) return 'zz';
   }
   if (state.level === 'secao') {
     if (!locais) return null;
