@@ -390,6 +390,8 @@ function draw() {
     ctx.fillStyle = colorOf(S.el[g.id]);
     ctx.fill(g.path);
   }
+  // nos níveis de polígonos, as ruas ficam por cima das cores como linhas claras
+  if (feats.length && showStreets) drawTiles(ctx, t, [vx0, vy0, vx1, vy1]);
   if (state.level === 'zona') {
     // divisória bem clara entre municípios dentro da mesma zona; bordas das zonas por cima
     ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 0.5 * px; ctx.stroke(geo.munMesh);
@@ -425,8 +427,8 @@ function drawExterior(c, px) {
 // ------------------------------------------------------------------ fundo OpenStreetMap
 // Tiles padrão do OpenStreetMap convertidos em linhas claras sobre fundo transparente:
 // cinza invertido (ruas claras viram escuras, fundo claro vira transparente) com opacidade
-// baixa, para um contorno bem claro das ruas no nível Seção. A projeção do app é Mercator,
-// a mesma dos tiles. Pode ser desligado no painel de filtros.
+// baixa, para um contorno bem claro das ruas (no fundo do nível Seção e por cima das cores nos
+// demais). A projeção do app é Mercator, a mesma dos tiles. Pode ser desligado no painel de filtros.
 const tileCache = new Map();
 let tileRedraw = null;
 let showStreets = true;
@@ -675,8 +677,6 @@ async function setLevel(lv) {
   document.querySelectorAll('.levels button').forEach(b => b.classList.toggle('active', b.dataset.level === lv));
   state.hover = null;
   closePanel();
-  $('#attribution').hidden = lv !== 'secao' || !showStreets;
-  $('#streets-row').hidden = lv !== 'secao';
   if (lv === 'secao') {
     if (METRIC[state.metric].diff) state.metric = 'pres';
     await loadLocais();
@@ -690,6 +690,7 @@ function setupUI() {
   $('#panel-close').addEventListener('click', closePanel);
   const st = $('#streets');
   st.checked = showStreets;
+  $('#attribution').hidden = !showStreets;
   st.addEventListener('change', () => {
     showStreets = st.checked;
     try { localStorage.setItem('mapa-tse:ruas', showStreets ? '1' : '0'); } catch (e) { /* sem storage */ }
