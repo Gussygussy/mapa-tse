@@ -189,6 +189,7 @@ async function init() {
   buildMapmodes();
   setupZoom();
   setupUI();
+  setupGeoSearch();
   updateScale();
   resize();
   fitView();
@@ -251,6 +252,15 @@ function drawOverlay() {
   octx.clearRect(0, 0, overlay.width, overlay.height);
   if (!projection) return;
   octx.setTransform(DPR * t.k, 0, 0, DPR * t.k, DPR * t.x, DPR * t.y);
+  if (searchPin) {
+    // alfinete do endereço buscado (tamanho fixo na tela)
+    const [x, y] = projection([searchPin.lon, searchPin.lat]);
+    octx.beginPath(); octx.arc(x, y, 16 * px, 0, 2 * Math.PI);
+    octx.fillStyle = 'rgba(79,156,249,.25)'; octx.fill();
+    octx.beginPath(); octx.arc(x, y, 7 * px, 0, 2 * Math.PI);
+    octx.fillStyle = '#4f9cf9'; octx.fill();
+    octx.strokeStyle = '#fff'; octx.lineWidth = 2 * px; octx.stroke();
+  }
   for (const [id, col, w] of [[state.hover, 'rgba(255,255,255,.8)', 1.5], [state.selected, '#fff', 2.5]]) {
     if (id == null) continue;
     octx.strokeStyle = col; octx.lineWidth = w * px;
@@ -772,6 +782,59 @@ function setupUI() {
     const id = pick(ev.clientX, ev.clientY);
     if (id != null) { hideTooltip(); openPanel(id); }
   });
+}
+
+// ------------------------------------------------------------------ busca de endereços
+// Nominatim (OpenStreetMap). Só busca ao enviar (Enter), como pede a política de uso do serviço.
+let searchPin = null;
+function setupGeoSearch() {
+  const form = $('#geosearch'), input = $('#geosearch-q'), out = $('#geosearch-results'), clear = $('#geosearch-clear');
+  let results = [];
+  const close = () => { out.hidden = true; };
+  input.addEventListener('input', () => { clear.hidden = !input.value; });
+  clear.addEventListener('click', () => { input.value = ''; clear.hidden = true; close(); searchPin = null; drawOverlay(); input.focus(); });
+  document.addEventListener('click', ev => { if (!form.contains(ev.target)) close(); });
+  input.addEventListener('keydown', ev => { if (ev.key === 'Escape') { close(); input.blur(); } });
+  form.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const q = input.value.trim();
+    if (!q) return;
+    out.hidden = false;
+    out.innerHTML = '<div class="gs-msg">Buscando…</div>';
+    try {
+      const url = 'https://nominatim.openstreetmap.org/search?' + new URLSearchParams({
+        q, format: 'jsonv2', limit: '5', 'accept-language': 'pt-BR',
+      });
+      results = await fetchJSON(url);
+    } catch (e) {
+      out.innerHTML = '<div class="gs-msg">Não foi possível buscar agora. Tente de novo.</div>';
+      return;
+    }
+    if (!results.length) { out.innerHTML = '<div class="gs-msg">Nenhum resultado.</div>'; return; }
+    out.innerHTML = results.map((r, i) => {
+      const [first, ...rest] = r.display_name.split(', ');
+      return `<button type="button" data-i="${i}">${esc(first)}<small>${esc(rest.join(', '))}</small></button>`;
+    }).join('');
+  });
+  out.addEventListener('click', ev => {
+    const b = ev.target.closest('button[data-i]'); if (!b) return;
+    const r = results[+b.dataset.i];
+    close();
+    input.value = r.display_name.split(', ').slice(0, 3).join(', ');
+    clear.hidden = false;
+    goToPlace(r);
+  });
+}
+function goToPlace(r) {
+  searchPin = { lat: +r.lat, lon: +r.lon };
+  // enquadra a caixa do resultado (sul, norte, oeste, leste), com zoom máximo de nível de rua
+  const [s, n, w, e] = r.boundingbox.map(Number);
+  const [x0, y0] = projection([w, n]), [x1, y1] = projection([e, s]);
+  const availW = W - (state.selected != null ? 440 : 0), pad = 80;
+  const k = Math.max(0.06, Math.min(2500, (availW - 2 * pad) / Math.max(x1 - x0, 1e-6), (H - 2 * pad) / Math.max(y1 - y0, 1e-6)));
+  const [cx, cy] = projection([searchPin.lon, searchPin.lat]);
+  d3.select(canvas).transition().duration(650)
+    .call(zoom.transform, d3.zoomIdentity.translate(availW / 2 - cx * k, H / 2 - cy * k).scale(k));
 }
 
 // ------------------------------------------------------------------ painel

@@ -25,6 +25,13 @@
 </nav>
 
 
+<form id="geosearch" class="geosearch" role="search" autocomplete="off">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+  <input type="search" id="geosearch-q" placeholder="Buscar endereço (OpenStreetMap) e Enter" aria-label="Buscar endereço">
+  <button type="button" id="geosearch-clear" class="gs-clear" aria-label="Limpar" hidden>✕</button>
+  <div id="geosearch-results" class="gs-results" hidden></div>
+</form>
+
 <div id="mapmodes" class="mapmodes">
   <div class="legend" id="legend"></div>
   <div class="mm-title" id="mm-title"></div>
