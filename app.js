@@ -253,13 +253,24 @@ function drawOverlay() {
   if (!projection) return;
   octx.setTransform(DPR * t.k, 0, 0, DPR * t.k, DPR * t.x, DPR * t.y);
   if (searchPin) {
-    // alfinete do endereço buscado (tamanho fixo na tela)
+    // alfinete do endereço buscado: ponta no ponto, tamanho fixo na tela. Amarelo forte com
+    // contorno escuro e halo, para destacar sobre o azul/vermelho do mapa e sobre o fundo escuro.
     const [x, y] = projection([searchPin.lon, searchPin.lat]);
-    octx.beginPath(); octx.arc(x, y, 16 * px, 0, 2 * Math.PI);
-    octx.fillStyle = 'rgba(79,156,249,.25)'; octx.fill();
-    octx.beginPath(); octx.arc(x, y, 7 * px, 0, 2 * Math.PI);
-    octx.fillStyle = '#4f9cf9'; octx.fill();
-    octx.strokeStyle = '#fff'; octx.lineWidth = 2 * px; octx.stroke();
+    const u = px, R = 13 * u, H = 40 * u, cy = y - H + R;   // raio da cabeça, altura total, centro da cabeça
+    const a = Math.asin(R / (H - R));                        // ângulo onde as laterais tangenciam a cabeça
+    const pin = new Path2D();
+    pin.moveTo(x, y);
+    pin.arc(x, cy, R, Math.PI / 2 + a, Math.PI / 2 - a);
+    pin.closePath();
+    octx.beginPath(); octx.ellipse(x, y, 8 * u, 3 * u, 0, 0, 2 * Math.PI);   // sombra no chão
+    octx.fillStyle = 'rgba(0,0,0,.6)'; octx.fill();
+    octx.save();
+    octx.shadowColor = 'rgba(255,214,10,.7)'; octx.shadowBlur = 14;          // halo
+    octx.fillStyle = '#ffd60a'; octx.fill(pin);
+    octx.restore();
+    octx.strokeStyle = '#0b0e13'; octx.lineWidth = 2.5 * u; octx.stroke(pin);
+    octx.beginPath(); octx.arc(x, cy, R * 0.42, 0, 2 * Math.PI);
+    octx.fillStyle = '#0b0e13'; octx.fill();
   }
   for (const [id, col, w] of [[state.hover, 'rgba(255,255,255,.8)', 1.5], [state.selected, '#fff', 2.5]]) {
     if (id == null) continue;
