@@ -465,6 +465,124 @@ def build_zone_geometry():
 
 build_zone_geometry()
 
+
+# ------------------------------------------------- seções (agrupadas por local)
+# Seções exatamente no mesmo local (mesmas coordenadas) viram um único ponto.
+def mun_centroids():
+    """centróide aproximado (média dos vértices do anel externo) por código IBGE"""
+    topo = json.load(open(os.path.join(RAW, 'raw', 'mun_int.topo.json')))
+    sx, sy = topo['transform']['scale']
+    tx, ty = topo['transform']['translate']
+    arcs = []
+    for arc in topo['arcs']:
+        x = y = 0
+        pts = []
+        for dx, dy in arc:
+            x += dx
+            y += dy
+            pts.append((x * sx + tx, y * sy + ty))
+        arcs.append(pts)
+    out = {}
+    for g in list(topo['objects'].values())[0]['geometries']:
+        polys = g['arcs'] if g['type'] == 'MultiPolygon' else [g['arcs']]
+        xs = ys = cnt = 0
+        for poly in polys:
+            for a in poly[0]:
+                for x, y in arcs[a if a >= 0 else ~a]:
+                    xs += x
+                    ys += y
+                    cnt += 1
+        if cnt:
+            out[g['properties']['codarea']] = (ys / cnt, xs / cnt)
+    return out
+
+
+def build_locais():
+    import random
+    from collections import Counter
+    rnd = random.Random(1)
+    LOC = cached('locais', load_locais)
+    CENT = mun_centroids()
+    gov_num = {uf: {v[1]: v[2] for v in cands[uf].values() if v[4] == 3} for uf in UFS}
+
+    groups = defaultdict(lambda: defaultdict(list))   # uf -> chave do local -> [seções]
+    meta = {}
+    for k in SEC_T:
+        uf, mun, z, s = k
+        if uf == 'zz':
+            continue
+        lat, lon, lname, bairro = LOC.get(k, (None, None, '', ''))
+        if lat is not None:
+            key = (mun, round(lat, 5), round(lon, 5))
+        else:
+            key = (mun, None, lname)
+        groups[uf][key].append(k)
+        meta.setdefault((uf, key), (lat, lon, f'{lname} ({bairro})' if bairro else lname))
+
+    total = 0
+    for uf in UFS:
+        cols = {c: [] for c in ('m', 'lat', 'lon', 'ns', 'z', 'apt', 'comp', 'val', 'bra', 'nul', 'pt', 'pl', 'gp', 'gm')}
+        names, munl, mun_idx, parties, party_idx = [], [], {}, [], {}
+        details = defaultdict(dict)
+        for key in sorted(groups[uf], key=lambda x: (x[0], str(x[1]), str(x[2]))):
+            secs = sorted(groups[uf][key], key=lambda k: (k[2], k[3]))
+            mun = key[0]
+            lat, lon, name = meta[(uf, key)]
+            if lat is None:
+                c = CENT.get(MUNS.get(mun, {}).get('ibge'))
+                if c is None:
+                    continue
+                lat, lon = c[0] + rnd.uniform(-0.01, 0.01), c[1] + rnd.uniform(-0.01, 0.01)
+            tot = {cg: [0] * 5 for cg in (1, 3, 5)}
+            votes = {cg: defaultdict(int) for cg in (1, 3, 5)}
+            for k in secs:
+                for cg in (1, 3, 5):
+                    t = SEC_T[k].get(cg)
+                    if t:
+                        for i in range(5):
+                            tot[cg][i] += t[i]
+                    for num, vv in SEC_V.get(k, {}).get(cg, {}).items():
+                        if num not in ('95', '96', '97'):
+                            votes[cg][num] += vv
+            t1 = tot[1] if tot[1][0] else tot[3]
+            gs = sorted(((vv, num) for num, vv in votes[3].items() if num in gov_num[uf]), reverse=True)
+            if gs and gs[0][0] > 0 and tot[3][2]:
+                p = gov_num[uf][gs[0][1]]
+                if p not in party_idx:
+                    party_idx[p] = len(parties)
+                    parties.append(p)
+                gp = party_idx[p]
+                gm = round(1000 * (gs[0][0] - (gs[1][0] if len(gs) > 1 else 0)) / tot[3][2])
+            else:
+                gp, gm = -1, 0
+            if mun not in mun_idx:
+                mun_idx[mun] = len(munl)
+                munl.append(mun)
+            i = len(names)
+            names.append(name)
+            row = {'m': mun_idx[mun], 'lat': round(lat * 1e5), 'lon': round(lon * 1e5), 'ns': len(secs),
+                   'z': Counter(k[2] for k in secs).most_common(1)[0][0],
+                   'apt': t1[0], 'comp': t1[1], 'val': t1[2], 'bra': t1[3], 'nul': t1[4],
+                   'pt': votes[1].get('13', 0), 'pl': votes[1].get('22', 0), 'gp': gp, 'gm': gm}
+            for c_, val in row.items():
+                cols[c_].append(val)
+            # detalhe: seções [[zona, seção]] e {cargo: [totais, {número: votos}]}
+            details[mun][str(i)] = {
+                's': [[k[2], k[3]] for k in secs],
+                'c': {str(cg): [tot[cg], {n_: v for n_, v in votes[cg].items() if v}] for cg in (1, 3, 5) if tot[cg][0]},
+            }
+        cols['names'] = names
+        cols['muns'] = munl
+        cols['parties'] = parties
+        dump(f's/{uf}.json', cols)
+        for mun, d in details.items():
+            dump(f'sd/{mun}.json', d)
+        total += len(names)
+    print('locais de votação (pontos)', total)
+
+
+build_locais()
+
 for scope, d in cands.items():
     dump(f'cand/{scope}.json', d)
 

@@ -2,7 +2,7 @@
 
 Mapa interativo (modo escuro) dos resultados do **1º turno das eleições gerais de 2026**, com comparação com 2022.
 
-- **Níveis:** País, Estado, Município e Zona eleitoral. O TSE não publica o desenho das zonas, então a área de cada zona é aproximada: polígonos de Voronoi dos locais de votação, recortados pelos limites dos municípios. O *Exterior* é um círculo no Atlântico.
+- **Níveis:** País, Estado, Município, Zona eleitoral e Seção (um ponto por local de votação; seções no mesmo local ficam agrupadas, com ruas do OpenStreetMap ao fundo, que podem ser desligadas). O TSE não publica o desenho das zonas, então a área de cada zona é aproximada: polígonos de Voronoi dos locais de votação, recortados pelos limites dos municípios. O *Exterior* é um círculo no Atlântico.
 - **Modos de mapa** (canto inferior esquerdo):
   - votos válidos e % de votos válidos sobre o eleitorado;
   - votos (comparecimento) e % de comparecimento;
@@ -19,6 +19,7 @@ index.html, style.css, app.js   app estático (d3 e topojson-client em vendor/)
 data/summary.json               métricas de cada elemento (Brasil, UFs, exterior, municípios, zonas)
 data/d/<id>.json                detalhe por elemento (totais e votos por candidato e cargo)
 data/cand/<escopo>.json         candidatos (nome, número, partido, situação)
+data/s/<uf>.json, data/sd/<mun>.json   locais de votação (pontos) e votos por local
 data/geo/                       malhas do IBGE (estados e municípios) e áreas aproximadas das zonas
 tools/build.py                  gera data/ a partir dos arquivos brutos do TSE e do IBGE
 ```

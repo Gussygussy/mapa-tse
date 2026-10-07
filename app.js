@@ -99,6 +99,7 @@ let S = null;          // summary.json
 let geo = {};          // features
 const cand = {};       // escopo -> dicionário de candidatos
 const detailCache = new Map();
+let locais = null;     // pontos do nível Seção (um por local de votação)
 
 // ------------------------------------------------------------------ canvas
 const canvas = $('#map');
@@ -251,7 +252,13 @@ function drawOverlay() {
   for (const [id, col, w] of [[state.hover, 'rgba(255,255,255,.8)', 1.5], [state.selected, '#fff', 2.5]]) {
     if (id == null) continue;
     octx.strokeStyle = col; octx.lineWidth = w * px;
-    const g = geo[state.level].find(f => f.id === id);
+    if (typeof id === 'number') {
+      if (!locais) continue;
+      const r = locais.radius(t.k) * px;
+      octx.beginPath(); octx.arc(locais.X[id], locais.Y[id], r + 1.5 * px, 0, 2 * Math.PI); octx.stroke();
+      continue;
+    }
+    const g = (geo[state.level] || [geo.exterior]).find(f => f.id === id);
     if (g) octx.stroke(g.path);
   }
 }
@@ -265,6 +272,7 @@ function currentElements() {
 }
 function metricValues() {
   const m = METRIC[state.metric];
+  if (state.level === 'secao') return locais ? locais.values(m) : [];
   return currentElements().map(([, e]) => m.get(e)).filter(v => v != null && isFinite(v));
 }
 
@@ -317,7 +325,7 @@ function updateScale() {
     const l = d3.scaleLinear().domain([0, hi]).clamp(true);
     sc.colorFor = (party, margin) => d3.interpolateRgb(GOV_BASE, partyColor(party))(0.3 + 0.7 * l(margin));
     sc.hi = hi;
-    sc.parties = [...new Set(currentElements().map(([, e]) => e.g && e.g[0]).filter(Boolean))];
+    sc.parties = state.level === 'secao' ? (locais ? locais.govParties() : []) : [...new Set(currentElements().map(([, e]) => e.g && e.g[0]).filter(Boolean))];
   }
   scale = sc;
   renderLegend();
@@ -366,7 +374,17 @@ function draw() {
   const vx0 = -t.x / t.k, vy0 = -t.y / t.k, vx1 = (W - t.x) / t.k, vy1 = (H - t.y) / t.k;
   const visible = b => !(b[2] < vx0 || b[0] > vx1 || b[3] < vy0 || b[1] > vy1);
 
-  const feats = geo[state.level];
+  if (state.level === 'secao') {
+    for (const g of geo.estado) { if (g.id !== 'zz') { ctx.fillStyle = '#1b2029'; ctx.fill(g.path); } }
+    if (showStreets) drawTiles(ctx, t, [vx0, vy0, vx1, vy1]);
+    // contorno dos municípios (mais visível conforme o zoom aumenta)
+    ctx.strokeStyle = `rgba(255,255,255,${Math.min(0.38, 0.17 + 0.035 * Math.log2(Math.max(1, t.k)))})`;
+    ctx.lineWidth = 0.6 * px; ctx.stroke(geo.munMesh);
+    if (locais) locais.draw(ctx, t, px, [vx0, vy0, vx1, vy1]);
+    ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.ufMesh);
+    ctx.fillStyle = colorOf(S.el.zz); ctx.fill(geo.exterior.path);
+  }
+  const feats = state.level === 'secao' ? [] : geo[state.level];
   for (const g of feats) {
     if (!visible(g.bbox)) continue;
     ctx.fillStyle = colorOf(S.el[g.id]);
@@ -404,6 +422,147 @@ function drawExterior(c, px) {
 }
 
 
+// ------------------------------------------------------------------ fundo OpenStreetMap
+// Tiles padrão do OpenStreetMap convertidos em linhas claras sobre fundo transparente:
+// cinza invertido (ruas claras viram escuras, fundo claro vira transparente) com opacidade
+// baixa, para um contorno bem claro das ruas no nível Seção. A projeção do app é Mercator,
+// a mesma dos tiles. Pode ser desligado no painel de filtros.
+const tileCache = new Map();
+let tileRedraw = null;
+let showStreets = true;
+try { showStreets = localStorage.getItem('mapa-tse:ruas') !== '0'; } catch (e) { /* sem storage */ }
+function processTile(img) {
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth; c.height = img.naturalHeight;
+  const g = c.getContext('2d');
+  g.drawImage(img, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height), a = d.data;
+  for (let i = 0; i < a.length; i += 4) {
+    const L = 0.299 * a[i] + 0.587 * a[i + 1] + 0.114 * a[i + 2];
+    // fundo do OSM é claro (~240): quanto mais escuro o traço original, mais visível aqui
+    const v = Math.max(0, Math.min(1, (232 - L) / 140));
+    a[i] = a[i + 1] = a[i + 2] = 235;
+    a[i + 3] = Math.round(v * 70);
+  }
+  g.putImageData(d, 0, 0);
+  return c;
+}
+function tileImage(z, x, y) {
+  const key = `${z}/${x}/${y}`;
+  let t = tileCache.get(key);
+  if (!t) {
+    t = { canvas: null };
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try { t.canvas = processTile(img); } catch (e) { return; }
+      clearTimeout(tileRedraw); tileRedraw = setTimeout(draw, 120);
+    };
+    img.src = `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+    tileCache.set(key, t);
+    if (tileCache.size > 500) tileCache.delete(tileCache.keys().next().value);
+  }
+  return t.canvas;
+}
+function drawTiles(c, t, [vx0, vy0, vx1, vy1]) {
+  const s = projection.scale(), [tx, ty] = projection.translate();
+  // nível de zoom do tile pelo tamanho na tela (considerando a densidade de pixels)
+  const z = Math.max(0, Math.min(19, Math.round(Math.log2(s * t.k * DPR * 2 * Math.PI / 256))));
+  const n = 2 ** z, size = 2 * Math.PI * s / n;          // tamanho do tile em coordenadas do mapa
+  const ox = tx - Math.PI * s, oy = ty - Math.PI * s;      // canto (0,0) do mundo Mercator
+  const x0 = Math.max(0, Math.floor((vx0 - ox) / size)), x1 = Math.min(n - 1, Math.floor((vx1 - ox) / size));
+  const y0 = Math.max(0, Math.floor((vy0 - oy) / size)), y1 = Math.min(n - 1, Math.floor((vy1 - oy) / size));
+  if ((x1 - x0 + 1) * (y1 - y0 + 1) > 400) return;
+  c.save();
+  c.imageSmoothingEnabled = true;
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
+    const img = tileImage(z, x, y);
+    if (img) c.drawImage(img, ox + x * size, oy + y * size, size + 0.5 / t.k, size + 0.5 / t.k);
+  }
+  c.restore();
+}
+
+// ------------------------------------------------------------------ seções
+// Um ponto por local de votação (seções no mesmo local agrupadas no build).
+async function loadLocais() {
+  if (locais) return locais;
+  const ufs = Object.keys(S.uf).filter(u => u !== 'zz');
+  let done = 0;
+  $('#loading').hidden = false;
+  $('#loading-text').textContent = `Carregando seções… 0/${ufs.length}`;
+  const parts = await Promise.all(ufs.map(uf => fetchJSON(`data/s/${uf}.json`).then(d => {
+    done++; $('#loading-text').textContent = `Carregando seções… ${done}/${ufs.length}`; d.uf = uf; return d;
+  })));
+  $('#loading').hidden = true;
+  const N = parts.reduce((a, p) => a + p.ns.length, 0);
+  const X = new Float32Array(N), Y = new Float32Array(N);
+  const cols = ['apt', 'comp', 'val', 'bra', 'nul', 'pt', 'pl', 'gm'];
+  const A = Object.fromEntries(cols.map(c => [c, new Int32Array(N)]));
+  const GP = new Array(N), REF = new Int32Array(N), PART = new Uint8Array(N);
+  let i = 0;
+  parts.forEach((p, pi) => {
+    for (let j = 0; j < p.ns.length; j++, i++) {
+      const [x, y] = projection([p.lon[j] / 1e5, p.lat[j] / 1e5]);
+      X[i] = x; Y[i] = y;
+      for (const c of cols) A[c][i] = p[c][j];
+      GP[i] = p.gp[j] >= 0 ? p.parties[p.gp[j]] : null;
+      REF[i] = j; PART[i] = pi;
+    }
+  });
+  // grade espacial para o hover
+  const CELL = 2, grid = new Map();
+  for (let k = 0; k < N; k++) {
+    const key = Math.floor(X[k] / CELL) + ',' + Math.floor(Y[k] / CELL);
+    let arr = grid.get(key); if (!arr) grid.set(key, arr = []); arr.push(k);
+  }
+  const elemOf = k => ({
+    t26: [A.apt[k], A.comp[k], A.val[k], A.bra[k], A.nul[k]], t22: null,
+    p26: [A.pt[k], A.pl[k]], p22: null, g: GP[k] ? [GP[k], A.gm[k] / 1000] : null,
+  });
+  const radiusPx = k => Math.min(8, 1.1 + Math.log2(Math.max(1, k)) * 0.8);
+  locais = {
+    N, X, Y,
+    elem: elemOf,
+    radius: radiusPx,
+    values(m) { const out = []; for (let k = 0; k < N; k++) { const v = m.get(elemOf(k)); if (v != null && isFinite(v)) out.push(v); } return out; },
+    govParties() { return [...new Set(GP.filter(Boolean))]; },
+    info(k) {
+      const p = parts[PART[k]], j = REF[k], mun = p.muns[p.m[j]];
+      return { uf: p.uf, mun, idx: j, ns: p.ns[j], z: p.z[j], name: p.names[j], munName: S.el[mun] ? S.el[mun].n : mun };
+    },
+    colors: null,
+    recolor() {
+      const by = new Map();
+      for (let k = 0; k < N; k++) { const c = colorOf(elemOf(k)); let a = by.get(c); if (!a) by.set(c, a = []); a.push(k); }
+      this.colors = by;
+    },
+    draw(c, t, px, [vx0, vy0, vx1, vy1]) {
+      if (!this.colors) this.recolor();
+      const r = radiusPx(t.k) * px;
+      for (const [col, idx] of this.colors) {
+        c.fillStyle = col;
+        c.beginPath();
+        for (const k of idx) {
+          const x = X[k], y = Y[k];
+          if (x < vx0 || x > vx1 || y < vy0 || y > vy1) continue;
+          c.moveTo(x + r, y); c.arc(x, y, r, 0, 2 * Math.PI);
+        }
+        c.fill();
+      }
+    },
+    nearest(mx, my, maxDist) {
+      let best = -1, bd = maxDist * maxDist;
+      const rr = Math.ceil(maxDist / CELL), cx = Math.floor(mx / CELL), cy = Math.floor(my / CELL);
+      for (let gx = cx - rr; gx <= cx + rr; gx++) for (let gy = cy - rr; gy <= cy + rr; gy++) {
+        const arr = grid.get(gx + ',' + gy); if (!arr) continue;
+        for (const k of arr) { const d = (X[k] - mx) ** 2 + (Y[k] - my) ** 2; if (d < bd) { bd = d; best = k; } }
+      }
+      return best;
+    },
+  };
+  return locais;
+}
+
 // ------------------------------------------------------------------ hit test
 function pick(mx, my) {
   const t = state.transform;
@@ -411,6 +570,11 @@ function pick(mx, my) {
   if (state.level !== 'pais') {
     const e = geo.exterior.ex;
     if ((x - e.cx) ** 2 + (y - e.cy) ** 2 <= e.r ** 2) return 'zz';
+  }
+  if (state.level === 'secao') {
+    if (!locais) return null;
+    const k = locais.nearest(x, y, 8 / t.k);   // raio de captura de ~8 px de tela
+    return k >= 0 ? k : null;
   }
   const feats = geo[state.level];
   let best = null;
@@ -433,7 +597,7 @@ function metricText(e) {
     return `<b style="color:${partyColor(e.g[0])}">${esc(e.g[0])}</b> · margem ${fmtPct(e.g[1], 1)}`;
   }
   const v = m.get(e);
-  if (v == null || !isFinite(v)) return m.diff ? 'Sem dados de 2022' : 'Sem dados';
+  if (v == null || !isFinite(v)) return m.diff ? (state.level === 'secao' ? 'Sem comparação com 2022 por seção' : 'Sem dados de 2022') : 'Sem dados';
   switch (m.kind) {
     case 'abs': return `<b>${fmtInt.format(v)}</b>`;
     case 'pct': return `<b>${fmtPct(v)}</b>`;
@@ -449,9 +613,13 @@ function zoneMuns(e, max = 3) {
   return ns.length > max ? ns.slice(0, max).join(', ') + ` +${ns.length - max}` : ns.join(', ');
 }
 function showTooltip(mx, my, id) {
-  const e = S.el[id];
-  let name, sub;
-  if (e && e.muns) {
+  let e = S.el[id], name, sub;
+  if (typeof id === 'number') {
+    const inf = locais.info(id);
+    e = locais.elem(id);
+    name = titleCase(inf.name || 'Local de votação');
+    sub = `${titleCase(inf.munName)} (${inf.uf.toUpperCase()}) · Zona ${inf.z} · ${inf.ns} ${inf.ns > 1 ? 'seções' : 'seção'}`;
+  } else if (e && e.muns) {
     name = e.n;
     sub = `${zoneMuns(e)} (${e.uf.toUpperCase()})`;
   } else {
@@ -487,11 +655,13 @@ function buildMapmodes() {
 function syncMapmodes() {
   document.querySelectorAll('.mm-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.metric === state.metric);
-    b.title = METRIC[b.dataset.metric].name;
+    b.disabled = state.level === 'secao' && METRIC[b.dataset.metric].diff;
+    b.title = METRIC[b.dataset.metric].name + (b.disabled ? ' (sem comparação com 2022 por seção)' : '');
   });
 }
 function setMetric(id) {
   state.metric = id;
+  if (locais) locais.colors = null;
   syncMapmodes(); updateScale(); draw();
 }
 async function setLevel(lv) {
@@ -500,12 +670,27 @@ async function setLevel(lv) {
   document.querySelectorAll('.levels button').forEach(b => b.classList.toggle('active', b.dataset.level === lv));
   state.hover = null;
   closePanel();
+  $('#attribution').hidden = lv !== 'secao' || !showStreets;
+  $('#streets-row').hidden = lv !== 'secao';
+  if (lv === 'secao') {
+    if (METRIC[state.metric].diff) state.metric = 'pres';
+    await loadLocais();
+    locais.colors = null;
+  }
   syncMapmodes(); updateScale(); draw();
 }
 
 function setupUI() {
   document.querySelectorAll('.levels button').forEach(b => b.addEventListener('click', () => setLevel(b.dataset.level)));
   $('#panel-close').addEventListener('click', closePanel);
+  const st = $('#streets');
+  st.checked = showStreets;
+  st.addEventListener('change', () => {
+    showStreets = st.checked;
+    try { localStorage.setItem('mapa-tse:ruas', showStreets ? '1' : '0'); } catch (e) { /* sem storage */ }
+    $('#attribution').hidden = !showStreets;
+    draw();
+  });
   window.addEventListener('resize', resize);
   window.addEventListener('keydown', ev => { if (ev.key === 'Escape') closePanel(); });
 
@@ -532,6 +717,11 @@ async function loadCand(scope) {
   if (!cand[scope]) cand[scope] = await fetchJSON(`data/cand/${scope}.json`);
   return cand[scope];
 }
+const sdCache = new Map();
+async function loadLocalDetail(mun) {
+  if (!sdCache.has(mun)) sdCache.set(mun, fetchJSON(`data/sd/${mun}.json`));
+  return sdCache.get(mun);
+}
 async function loadDetail(id) {
   if (!detailCache.has(id)) detailCache.set(id, fetchJSON(`data/d/${id}.json`));
   return detailCache.get(id);
@@ -553,6 +743,26 @@ async function openPanel(id) {
   body.innerHTML = '<div class="empty">Carregando…</div>';
   let pc;   // contexto do painel
   try {
+   if (typeof id === 'number') {
+    const inf = locais.info(id);
+    const [sd] = await Promise.all([loadLocalDetail(inf.mun), loadCand('br'), loadCand(inf.uf)]);
+    const d = sd[String(inf.idx)] || { s: [], c: {} };
+    $('#panel-sub').textContent = `${titleCase(inf.munName)} (${inf.uf.toUpperCase()}) · Local de votação`;
+    $('#panel-title').textContent = titleCase(inf.name || 'Local de votação');
+    // número do candidato -> sq
+    const byNum = (scope, cg) => {
+      const m = {}; for (const [sq, c] of Object.entries(cand[scope])) if (c[4] === cg) m[c[1]] = sq; return m;
+    };
+    const c = {};
+    for (const [cg, [t, v]] of Object.entries(d.c)) {
+      const map = byNum(cg === '1' ? 'br' : inf.uf, +cg);
+      c[cg] = { t, v: Object.entries(v).filter(([n]) => map[n]).map(([n, vv]) => [map[n], vv]).sort((a, b) => b[1] - a[1]) };
+    }
+    const byZone = {};
+    for (const [z, sec] of d.s) (byZone[z] = byZone[z] || []).push(sec);
+    const secTxt = Object.entries(byZone).map(([z, ss]) => `Zona ${z}: ${ss.length > 1 ? 'seções' : 'seção'} ${ss.join(', ')}`).join(' · ');
+    pc = { id, kind: 'local', uf: inf.uf, detail: { c }, tabs: [1, 3, 5], muns: secTxt };
+   } else {
     const e = S.el[id];
     const detail = await loadDetail(id);
     const uf = id === 'br' ? null : e.uf;
@@ -565,6 +775,7 @@ async function openPanel(id) {
       : kind === 'estado' ? S.uf[id] : kind === 'zona' ? e.n : titleCase(e.n);
     const tabs = kind === 'pais' ? [1, 3, 5, 6] : kind === 'exterior' ? [1] : [1, 3, 5, 6, 7];
     pc = { id, kind, uf, detail, tabs, muns: kind === 'zona' ? zoneMuns(e, 12) : null };
+   }
   } catch (err) {
     body.innerHTML = `<div class="empty">Não foi possível carregar os dados (${esc(err.message)}).</div>`;
     return;
@@ -702,6 +913,11 @@ $('#panel-body').addEventListener('click', ev => {
 // gancho para testes automatizados: centraliza o mapa em [lon, lat] com zoom k
 window.__mapaT = () => state.transform;
 window.__mapa = {
+  localScreen(lon, lat) {
+    const [x, y] = projection([lon, lat]);
+    const k = locais.nearest(x, y, 5), t = state.transform;
+    return [locais.X[k] * t.k + t.x, locais.Y[k] * t.k + t.y];
+  },
   redraw() { draw(); return lastDrawMs; },
   zoomTo(lon, lat, k) {
     const [x, y] = projection([lon, lat]);
