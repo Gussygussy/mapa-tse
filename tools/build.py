@@ -580,6 +580,30 @@ def build_locais():
         total += len(names)
     print('locais de votação (pontos)', total)
 
+    # exterior: sem coordenadas no TSE; um elemento por cidade (o app desenha bolhas dentro do globo)
+    zz_names = {m['cd']: m['nm'] for a in cm['abr'] if a['cd'] == 'zz' for m in a['mu']}
+    cities = defaultdict(list)
+    for k in SEC_T:
+        if k[0] == 'zz':
+            cities[k[1]].append(k)
+    out = []
+    for code, secs in cities.items():
+        t = [0] * 5
+        v = defaultdict(int)
+        for k in secs:
+            tt = SEC_T[k].get(1)
+            if tt:
+                for i in range(5):
+                    t[i] += tt[i]
+            for num, vv in SEC_V.get(k, {}).get(1, {}).items():
+                if num not in ('95', '96', '97') and vv:
+                    v[num] += vv
+        if t[0]:
+            out.append({'cd': code, 'n': zz_names.get(code, code), 'ns': len(secs), 't': t, 'v': dict(v)})
+    out.sort(key=lambda r: -r['t'][0])
+    dump('s/zz.json', out)
+    print('cidades no exterior', len(out))
+
 
 build_locais()
 

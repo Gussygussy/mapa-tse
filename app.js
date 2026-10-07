@@ -100,6 +100,7 @@ let geo = {};          // features
 const cand = {};       // escopo -> dicionário de candidatos
 const detailCache = new Map();
 let locais = null;     // pontos do nível Seção (um por local de votação)
+let extCities = null;  // nível Seção: cidades do exterior como bolhas dentro do globo (id 'x<código>')
 
 // ------------------------------------------------------------------ canvas
 const canvas = $('#map');
@@ -258,6 +259,11 @@ function drawOverlay() {
       octx.beginPath(); octx.arc(locais.X[id], locais.Y[id], r + 1.5 * px, 0, 2 * Math.PI); octx.stroke();
       continue;
     }
+    if (typeof id === 'string' && id[0] === 'x' && extCities) {
+      const b = extCities.get(id);
+      octx.beginPath(); octx.arc(b.x, b.y, b.r, 0, 2 * Math.PI); octx.stroke();
+      continue;
+    }
     const g = (geo[state.level] || [geo.exterior]).find(f => f.id === id);
     if (g) octx.stroke(g.path);
   }
@@ -272,7 +278,12 @@ function currentElements() {
 }
 function metricValues() {
   const m = METRIC[state.metric];
-  if (state.level === 'secao') return locais ? locais.values(m) : [];
+  if (state.level === 'secao') {
+    if (!locais) return [];
+    const out = locais.values(m);
+    for (const b of extCities.values()) { const v = m.get(b.e); if (v != null && isFinite(v)) out.push(v); }
+    return out;
+  }
   return currentElements().map(([, e]) => m.get(e)).filter(v => v != null && isFinite(v));
 }
 
@@ -382,7 +393,8 @@ function draw() {
     ctx.lineWidth = 0.6 * px; ctx.stroke(geo.munMesh);
     if (locais) locais.draw(ctx, t, px, [vx0, vy0, vx1, vy1]);
     ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.ufMesh);
-    ctx.fillStyle = colorOf(S.el.zz); ctx.fill(geo.exterior.path);
+    if (extCities) drawExtCities(ctx, t, px);
+    else { ctx.fillStyle = colorOf(S.el.zz); ctx.fill(geo.exterior.path); }
   }
   const feats = state.level === 'secao' ? [] : geo[state.level];
   for (const g of feats) {
@@ -415,12 +427,13 @@ function draw() {
 
 function drawExterior(c, px) {
   const ex = geo.exterior;
-  c.strokeStyle = 'rgba(14,17,22,.55)'; c.lineWidth = 1.2 * px; c.stroke(geo.exLines);
+  if (!(state.level === 'secao' && extCities)) {
+    c.strokeStyle = 'rgba(14,17,22,.55)'; c.lineWidth = 1.2 * px; c.stroke(geo.exLines);
+  }
   c.strokeStyle = 'rgba(255,255,255,.45)'; c.lineWidth = 1.2 * px; c.stroke(ex.path);
-  const fs = Math.max(13 * px, 9);  // cresce com o zoom até o tamanho natural no mapa
-  c.font = `500 ${fs}px Roboto, system-ui, sans-serif`;
+  c.font = `500 ${13 * px}px Roboto, system-ui, sans-serif`;   // tamanho fixo na tela
   c.fillStyle = '#a7afbd'; c.textAlign = 'center'; c.textBaseline = 'top';
-  c.fillText('Exterior', ex.ex.cx, ex.ex.cy + ex.ex.r + 6 * Math.min(px, 1));
+  c.fillText('Exterior', ex.ex.cx, ex.ex.cy + ex.ex.r + 6 * px);
 }
 
 
@@ -492,10 +505,14 @@ async function loadLocais() {
   let done = 0;
   $('#loading').hidden = false;
   $('#loading-text').textContent = `Carregando seções… 0/${ufs.length}`;
-  const parts = await Promise.all(ufs.map(uf => fetchJSON(`data/s/${uf}.json`).then(d => {
-    done++; $('#loading-text').textContent = `Carregando seções… ${done}/${ufs.length}`; d.uf = uf; return d;
-  })));
+  const [parts, zzCities] = await Promise.all([
+    Promise.all(ufs.map(uf => fetchJSON(`data/s/${uf}.json`).then(d => {
+      done++; $('#loading-text').textContent = `Carregando seções… ${done}/${ufs.length}`; d.uf = uf; return d;
+    }))),
+    fetchJSON('data/s/zz.json'),
+  ]);
   $('#loading').hidden = true;
+  buildExtCities(zzCities);
   const N = parts.reduce((a, p) => a + p.ns.length, 0);
   const X = new Float32Array(N), Y = new Float32Array(N);
   const cols = ['apt', 'comp', 'val', 'bra', 'nul', 'pt', 'pl', 'gm'];
@@ -565,13 +582,55 @@ async function loadLocais() {
   return locais;
 }
 
+// O TSE não tem coordenadas dos locais no exterior: cada cidade vira uma bolha (área ∝ eleitorado)
+// empacotada dentro do círculo do exterior.
+function buildExtCities(list) {
+  const ex = geo.exterior.ex;
+  const nodes = list.map(c => ({ c, r: Math.max(Math.sqrt(c.t[0]), 14) }));
+  d3.packSiblings(nodes);
+  const enc = d3.packEnclose(nodes), f = ex.r * 0.93 / enc.r;
+  extCities = new Map();
+  for (const n of nodes) {
+    const v = n.c.v;
+    extCities.set('x' + n.c.cd, {
+      x: ex.cx + (n.x - enc.x) * f, y: ex.cy + (n.y - enc.y) * f, r: n.r * f, c: n.c,
+      e: { t26: n.c.t, t22: null, p26: [v['13'] || 0, v['22'] || 0], p22: null, g: null },
+    });
+  }
+}
+function drawExtCities(c, t, px) {
+  const ex = geo.exterior;
+  c.fillStyle = '#1b2029'; c.fill(ex.path);
+  for (const b of extCities.values()) {
+    c.beginPath(); c.arc(b.x, b.y, b.r, 0, 2 * Math.PI);
+    c.fillStyle = colorOf(b.e); c.fill();
+    c.strokeStyle = 'rgba(14,17,22,.7)'; c.lineWidth = 0.6 * px; c.stroke();
+  }
+  // nomes das cidades quando a bolha fica grande na tela
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  for (const b of extCities.values()) {
+    const rPx = b.r * t.k;
+    if (rPx < 22) continue;
+    const name = titleCase(b.c.n), fs = Math.min(13, rPx / 3.2);
+    c.font = `500 ${fs * px}px Roboto, system-ui, sans-serif`;
+    // texto escuro em bolhas claras e claro em bolhas escuras
+    c.fillStyle = d3.lab(colorOf(b.e)).l > 60 ? 'rgba(14,17,22,.88)' : 'rgba(255,255,255,.92)';
+    c.fillText(name, b.x, b.y, 1.8 * b.r);
+  }
+}
+
 // ------------------------------------------------------------------ hit test
 function pick(mx, my) {
   const t = state.transform;
   const x = (mx - t.x) / t.k, y = (my - t.y) / t.k;
   if (state.level !== 'pais') {
     const e = geo.exterior.ex;
-    if ((x - e.cx) ** 2 + (y - e.cy) ** 2 <= e.r ** 2) return 'zz';
+    if ((x - e.cx) ** 2 + (y - e.cy) ** 2 <= e.r ** 2) {
+      if (state.level === 'secao' && extCities) {
+        for (const [id, b] of extCities) if ((x - b.x) ** 2 + (y - b.y) ** 2 <= b.r ** 2) return id;
+      }
+      return 'zz';
+    }
   }
   if (state.level === 'secao') {
     if (!locais) return null;
@@ -621,7 +680,12 @@ function zoneMuns(e, max = 3) {
 }
 function showTooltip(mx, my, id) {
   let e = S.el[id], name, sub;
-  if (typeof id === 'number') {
+  if (typeof id === 'string' && id[0] === 'x') {
+    const b = extCities.get(id);
+    e = b.e;
+    name = titleCase(b.c.n);
+    sub = `Exterior · ${b.c.ns} ${b.c.ns > 1 ? 'seções' : 'seção'}`;
+  } else if (typeof id === 'number') {
     const inf = locais.info(id);
     e = locais.elem(id);
     name = titleCase(inf.name || 'Local de votação');
@@ -749,7 +813,17 @@ async function openPanel(id) {
   body.innerHTML = '<div class="empty">Carregando…</div>';
   let pc;   // contexto do painel
   try {
-   if (typeof id === 'number') {
+   if (typeof id === 'string' && id[0] === 'x') {
+    const b = extCities.get(id);
+    await loadCand('br');
+    const map = {};
+    for (const [sq, c] of Object.entries(cand.br)) map[c[1]] = sq;
+    $('#panel-sub').textContent = 'Exterior · cidade';
+    $('#panel-title').textContent = titleCase(b.c.n);
+    const v = Object.entries(b.c.v).filter(([n]) => map[n]).map(([n, vv]) => [map[n], vv]).sort((a, c) => c[1] - a[1]);
+    pc = { id, kind: 'local', uf: 'zz', detail: { c: { 1: { t: b.c.t, v } } }, tabs: [1],
+      muns: `${b.c.ns} ${b.c.ns > 1 ? 'seções' : 'seção'}` };
+   } else if (typeof id === 'number') {
     const inf = locais.info(id);
     const [sd] = await Promise.all([loadLocalDetail(inf.mun), loadCand('br'), loadCand(inf.uf)]);
     const d = sd[String(inf.idx)] || { s: [], c: {} };
@@ -921,6 +995,13 @@ $('#panel-body').addEventListener('click', ev => {
 // gancho para testes automatizados: centraliza o mapa em [lon, lat] com zoom k
 window.__mapaT = () => state.transform;
 window.__mapa = {
+  zoomToMap(x, y, k) {
+    d3.select(canvas).call(zoom.transform, d3.zoomIdentity.translate(W / 2 - x * k, H / 2 - y * k).scale(k));
+  },
+  extCityScreen(i) {
+    const b = [...extCities.values()][i], t = state.transform;
+    return [b.x * t.k + t.x, b.y * t.k + t.y];
+  },
   localScreen(lon, lat) {
     const [x, y] = projection([lon, lat]);
     const k = locais.nearest(x, y, 5), t = state.transform;
