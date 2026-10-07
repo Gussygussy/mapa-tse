@@ -32,6 +32,7 @@ body {
 }
 button { font: inherit; color: inherit; }
 
+#overlay { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; pointer-events: none; }
 #map { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; cursor: grab; }
 #map.dragging { cursor: grabbing; }
 #map.hovering { cursor: pointer; }
@@ -56,32 +57,17 @@ button { font: inherit; color: inherit; }
 .levels button:hover { color: var(--text); background: var(--surface-2); }
 .levels button.active { background: var(--surface-3); color: var(--text); }
 
-/* exterior */
-.exterior {
-  position: fixed; left: 16px; bottom: 16px; z-index: 10;
-  display: flex; align-items: center; gap: 8px; padding: 8px 12px 8px 8px; cursor: pointer;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
-  box-shadow: 0 4px 18px rgba(0,0,0,.35);
-}
-.exterior svg { width: 30px; height: 30px; padding: 4px; border-radius: 50%; color: #0e1116; background: var(--surface-3); }
-.exterior span { color: var(--text-2); font-weight: 500; }
-.exterior:hover span { color: var(--text); }
-.exterior.selected { outline: 2px solid var(--text); }
-.exterior[hidden] { display: none; }
-
 /* map modes (estilo Paradox) */
 .mapmodes {
-  position: fixed; right: 16px; bottom: 16px; z-index: 10; width: 292px;
+  position: fixed; left: 16px; bottom: 16px; z-index: 10; width: 228px;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 10px; box-shadow: 0 4px 18px rgba(0,0,0,.35);
-  transition: right .2s;
 }
-body.panel-open .mapmodes { right: 456px; }
 .mm-title { font-weight: 700; margin: 8px 2px 8px; font-size: 13px; }
-.mm-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; }
+.mm-grid { display: grid; grid-template-columns: repeat(4, 46px); gap: 6px; }
 .mm-group-label { grid-column: 1 / -1; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); margin-top: 4px; }
 .mm-btn {
-  aspect-ratio: 1; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2);
+  width: 46px; height: 46px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2);
   display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; position: relative;
 }
 .mm-btn svg { width: 24px; height: 24px; }
@@ -144,9 +130,9 @@ body.panel-open .mapmodes { right: 456px; }
 .abst .bar .c { background: var(--valid); color: #10140a; }
 .abst .bar .a { background: var(--surface-3); color: var(--text-2); }
 
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 4px 0 10px; overflow-x: auto; scrollbar-width: none; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 4px 0 10px; overflow-x: auto; scrollbar-width: none; }
 .tabs button {
-  border: 0; background: none; padding: 9px 9px; cursor: pointer; color: var(--text-3); font-weight: 500; white-space: nowrap;
+  flex: 1 0 auto; border: 0; background: none; padding: 9px 4px; cursor: pointer; color: var(--text-3); font-weight: 500; white-space: nowrap; font-size: 13px;
   border-bottom: 2px solid transparent; margin-bottom: -1px;
 }
 .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
@@ -196,6 +182,6 @@ body.panel-open .mapmodes { right: 456px; }
 @media (max-width: 760px) {
   .panel { width: 100%; }
   body.panel-open .mapmodes { display: none; }
-  .mapmodes { width: auto; left: 16px; right: 16px; bottom: 64px; }
+  .mapmodes { width: auto; left: 16px; right: 16px; bottom: 16px; }
   .levels button { padding: 7px 10px; }
 }

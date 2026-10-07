@@ -104,6 +104,11 @@ const detailCache = new Map();
 // ------------------------------------------------------------------ canvas
 const canvas = $('#map');
 const ctx = canvas.getContext('2d');
+const overlay = $('#overlay');            // destaques (hover/seleção), redesenhados sem refazer o mapa
+const octx = overlay.getContext('2d');
+const snap = document.createElement('canvas');   // cópia do último desenho completo, usada durante o zoom
+const snapCtx = snap.getContext('2d');
+let snapT = null, lastDrawMs = 0;
 const hitCtx = document.createElement('canvas').getContext('2d');
 let W = 0, H = 0, DPR = 1;
 let projection, baseScale;
@@ -111,7 +116,7 @@ let projection, baseScale;
 function resize() {
   DPR = window.devicePixelRatio || 1;
   W = window.innerWidth; H = window.innerHeight;
-  canvas.width = W * DPR; canvas.height = H * DPR;
+  for (const c of [canvas, overlay, snap]) { c.width = W * DPR; c.height = H * DPR; }
   draw();
 }
 
@@ -144,8 +149,20 @@ async function init() {
     return { id: f.id, path: p, bbox: [x0, y0, x1, y1], area: (x1 - x0) * (y1 - y0) };
   });
   geo.pais = mk([brFeat]);
-  geo.estado = mk(ufFeats);
-  geo.municipio = mk(munFeats);
+  // Exterior: elemento físico no mapa, um círculo no Atlântico (canto inferior direito do enquadramento)
+  const EX = { cx: 880, cy: 860, r: 58 };
+  const exPath = new Path2D(); exPath.arc(EX.cx, EX.cy, EX.r, 0, 2 * Math.PI);
+  const exLines = new Path2D();
+  exLines.ellipse(EX.cx, EX.cy, EX.r * 0.45, EX.r, 0, 0, 2 * Math.PI);
+  exLines.moveTo(EX.cx, EX.cy - EX.r); exLines.lineTo(EX.cx, EX.cy + EX.r);
+  for (const f of [-0.45, 0, 0.45]) {
+    const y = EX.cy + f * EX.r, hw = Math.sqrt(1 - f * f) * EX.r;
+    exLines.moveTo(EX.cx - hw, y); exLines.lineTo(EX.cx + hw, y);
+  }
+  const exterior = { id: 'zz', path: exPath, bbox: [EX.cx - EX.r, EX.cy - EX.r, EX.cx + EX.r, EX.cy + EX.r], area: Math.PI * EX.r ** 2, ex: EX };
+  geo.exterior = exterior; geo.exLines = exLines;
+  geo.estado = mk(ufFeats).concat(exterior);
+  geo.municipio = mk(munFeats).concat(exterior);
   geo.ufMesh = new Path2D(); d3.geoPath(projection, geo.ufMesh)(ufMesh);
   geo.outline = new Path2D(); d3.geoPath(projection, geo.outline)(brOutline);
   geo.munMesh = new Path2D(); d3.geoPath(projection, geo.munMesh)(topojson.mesh(munTopo, munObj, (a, b) => a !== b));
@@ -153,10 +170,9 @@ async function init() {
   buildMapmodes();
   setupZoom();
   setupUI();
+  updateScale();
   resize();
   fitView();
-  updateScale();
-  draw();
   $('#loading').hidden = true;
 }
 
@@ -172,7 +188,7 @@ function fitView() {
 function setupZoom() {
   zoom = d3.zoom().scaleExtent([0.2, 6000])
     .on('start', ev => { if (ev.sourceEvent && ev.sourceEvent.type === 'mousedown') canvas.classList.add('dragging'); })
-    .on('zoom', ev => { state.transform = ev.transform; scheduleDraw(); hideTooltip(); })
+    .on('zoom', ev => { state.transform = ev.transform; scheduleZoomDraw(); hideTooltip(); })
     .on('end', () => canvas.classList.remove('dragging'));
   d3.select(canvas).call(zoom).on('dblclick.zoom', null);
 }
@@ -183,6 +199,53 @@ function scheduleDraw() {
   rafPending = true;
   requestAnimationFrame(() => { rafPending = false; draw(); });
 }
+// Durante zoom/arraste: se o desenho completo é lento, reaproveita a última imagem
+// (transformada) e só redesenha tudo quando o movimento para.
+let zoomRaf = false, zoomIdle = null;
+function scheduleZoomDraw() {
+  if (lastDrawMs < 35 || !snapT) { scheduleDraw(); return; }
+  if (!zoomRaf) {
+    zoomRaf = true;
+    requestAnimationFrame(() => { zoomRaf = false; quickDraw(); });
+  }
+  clearTimeout(zoomIdle);
+  zoomIdle = setTimeout(draw, 160);
+}
+function quickDraw() {
+  const t = state.transform, s = t.k / snapT.k;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#0b0e13';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(s, 0, 0, s, DPR * (t.x - s * snapT.x), DPR * (t.y - s * snapT.y));
+  ctx.drawImage(snap, 0, 0);
+  drawOverlay();
+}
+let ovRaf = false;
+function scheduleOverlay() {
+  if (ovRaf) return;
+  ovRaf = true;
+  requestAnimationFrame(() => { ovRaf = false; drawOverlay(); });
+}
+function drawOverlay() {
+  const t = state.transform, px = 1 / t.k;
+  octx.setTransform(1, 0, 0, 1, 0, 0);
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  if (!projection) return;
+  octx.setTransform(DPR * t.k, 0, 0, DPR * t.k, DPR * t.x, DPR * t.y);
+  for (const [id, col, w] of [[state.hover, 'rgba(255,255,255,.8)', 1.5], [state.selected, '#fff', 2.5]]) {
+    if (id == null) continue;
+    octx.strokeStyle = col; octx.lineWidth = w * px;
+    if (id === 'zz') { octx.stroke(geo.exterior.path); continue; }
+    if (state.level === 'secao') {
+      if (typeof id !== 'number' || !sections) continue;
+      const [x, y] = sections.pos(id, t.k), r = sections.radius(t.k) * px;
+      octx.beginPath(); octx.arc(x, y, r + 1.5 * px, 0, 2 * Math.PI); octx.stroke();
+    } else {
+      const g = geo[state.level].find(f => f.id === id);
+      if (g) octx.stroke(g.path);
+    }
+  }
+}
 
 // ------------------------------------------------------------------ escalas
 // Limites a partir dos dados do nível atual (percentis), nunca 0%/100% fixos.
@@ -190,7 +253,6 @@ let scale = null;
 function currentElements() {
   if (state.level === 'secao') return null;
   const ids = state.level === 'pais' ? ['br'] : geo[state.level].map(g => g.id);
-  if (state.level !== 'pais') ids.push('zz');
   return ids.map(id => [id, S.el[id]]).filter(([, e]) => e);
 }
 function metricValues() {
@@ -288,7 +350,9 @@ function renderLegend() {
 
 // ------------------------------------------------------------------ desenho
 function draw() {
-  if (!projection) return;
+  if (!projection || !scale) return;
+  clearTimeout(zoomIdle);
+  const t0 = performance.now();
   const t = state.transform;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--sea') || '#0b0e13';
@@ -301,7 +365,9 @@ function draw() {
 
   if (state.level === 'secao') {
     for (const g of geo.estado) { ctx.fillStyle = '#1b2029'; ctx.fill(g.path); }
-    if (t.k > 4) { ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.lineWidth = 0.6 * px; ctx.stroke(geo.munMesh); }
+    // contorno dos municípios (mais visível conforme o zoom aumenta)
+    ctx.strokeStyle = `rgba(255,255,255,${Math.min(0.38, 0.17 + 0.035 * Math.log2(Math.max(1, t.k)))})`;
+    ctx.lineWidth = 0.6 * px; ctx.stroke(geo.munMesh);
     if (sections) sections.draw(ctx, t, px, [vx0, vy0, vx1, vy1]);
     ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.ufMesh);
     ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.stroke(geo.outline);
@@ -319,12 +385,25 @@ function draw() {
       ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.2 * px; ctx.stroke(geo.ufMesh);
     }
     ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.outline);
-    for (const [id, col, w] of [[state.hover, 'rgba(255,255,255,.75)', 1.5], [state.selected, '#fff', 2.5]]) {
-      const g = id && feats.find(f => f.id === id);
-      if (g) { ctx.strokeStyle = col; ctx.lineWidth = w * px; ctx.stroke(g.path); }
-    }
   }
-  updateExteriorButton();
+  if (state.level !== 'pais') drawExterior(ctx, px);
+  snapCtx.setTransform(1, 0, 0, 1, 0, 0);
+  snapCtx.clearRect(0, 0, snap.width, snap.height);
+  snapCtx.drawImage(canvas, 0, 0);
+  snapT = { k: t.k, x: t.x, y: t.y };
+  lastDrawMs = performance.now() - t0;
+  drawOverlay();
+}
+
+function drawExterior(c, px) {
+  const ex = geo.exterior;
+  if (state.level === 'secao') { c.fillStyle = colorOf(S.el.zz); c.fill(ex.path); }
+  c.strokeStyle = 'rgba(14,17,22,.55)'; c.lineWidth = 1.2 * px; c.stroke(geo.exLines);
+  c.strokeStyle = 'rgba(255,255,255,.45)'; c.lineWidth = 1.2 * px; c.stroke(ex.path);
+  const fs = Math.max(13 * px, 9);  // cresce com o zoom até o tamanho natural no mapa
+  c.font = `500 ${fs}px Roboto, system-ui, sans-serif`;
+  c.fillStyle = '#a7afbd'; c.textAlign = 'center'; c.textBaseline = 'top';
+  c.fillText('Exterior', ex.ex.cx, ex.ex.cy + ex.ex.r + 6 * Math.min(px, 1));
 }
 
 // ------------------------------------------------------------------ seções
@@ -355,6 +434,24 @@ async function loadSections() {
       REF[i] = j; PART[i] = pi;
     }
   });
+  // seções no mesmo local de votação: deslocamento em "girassol" (em múltiplos do raio do ponto),
+  // aplicado em pixels de tela no zoom alto para que cada seção apareça separada
+  const OX = new Float32Array(N), OY = new Float32Array(N);
+  const groups = new Map();
+  for (let k = 0; k < N; k++) {
+    const key = X[k] + ',' + Y[k];
+    let g = groups.get(key); if (!g) groups.set(key, g = []); g.push(k);
+  }
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    g.forEach((k, n) => {
+      const rr = Math.sqrt(n) * 1.15, a = n * 2.39996;
+      OX[k] = rr * Math.cos(a); OY[k] = rr * Math.sin(a);
+    });
+  }
+  // fator de espalhamento (em px por unidade de deslocamento) conforme o zoom
+  const spread = (k, rPx) => 2 * rPx * Math.min(1, Math.max(0, (k - 20) / 180));
+  const radiusPx = k => Math.min(7, 0.9 + Math.log2(Math.max(1, k)) * 0.75);
   // grade espacial para hover
   const CELL = 2;
   const grid = new Map();
@@ -388,32 +485,34 @@ async function loadSections() {
     draw(c, t, px, view) {
       if (!this.colors) this.recolor();
       // raio em pixels de tela cresce suavemente com o zoom
-      const rPx = Math.min(7, 0.9 + Math.log2(Math.max(1, t.k)) * 0.75);
-      const r = rPx * px;
+      const rPx = radiusPx(t.k);
+      const r = rPx * px, sp = spread(t.k, rPx) * px, small = rPx < 2.5;
       const [vx0, vy0, vx1, vy1] = view;
       for (const [col, idx] of this.colors) {
         c.fillStyle = col;
         c.beginPath();
         for (const k of idx) {
-          const x = X[k], y = Y[k];
+          const x = X[k] + OX[k] * sp, y = Y[k] + OY[k] * sp;
           if (x < vx0 || x > vx1 || y < vy0 || y > vy1) continue;
-          c.rect(x - r, y - r, 2 * r, 2 * r);
+          // abaixo de ~2,5 px o círculo é indistinguível de um quadrado e o quadrado é bem mais rápido
+          if (small) c.rect(x - r, y - r, 2 * r, 2 * r); else { c.moveTo(x + r, y); c.arc(x, y, r, 0, 2 * Math.PI); }
         }
         c.fill();
       }
-      for (const [k, col] of [[state.hover, 'rgba(255,255,255,.8)'], [state.selected, '#fff']]) {
-        if (typeof k !== 'number') continue;
-        c.strokeStyle = col; c.lineWidth = 2 * px;
-        c.strokeRect(X[k] - r - px, Y[k] - r - px, 2 * r + 2 * px, 2 * r + 2 * px);
-      }
     },
-    nearest(mx, my, maxDist) {
+    radius: radiusPx,
+    pos(k, zk) {
+      const sp = spread(zk, radiusPx(zk)) / zk;
+      return [X[k] + OX[k] * sp, Y[k] + OY[k] * sp];
+    },
+    nearest(mx, my, maxDist, zk) {
       let best = -1, bd = maxDist * maxDist;
-      const r = Math.ceil(maxDist / CELL);
+      const sp = spread(zk, radiusPx(zk)) / zk;
+      const r = Math.ceil(maxDist / CELL) + 1;
       const cx = Math.floor(mx / CELL), cy = Math.floor(my / CELL);
       for (let gx = cx - r; gx <= cx + r; gx++) for (let gy = cy - r; gy <= cy + r; gy++) {
         const arr = grid.get(gx + ',' + gy); if (!arr) continue;
-        for (const k of arr) { const d = (X[k] - mx) ** 2 + (Y[k] - my) ** 2; if (d < bd) { bd = d; best = k; } }
+        for (const k of arr) { const d = (X[k] + OX[k] * sp - mx) ** 2 + (Y[k] + OY[k] * sp - my) ** 2; if (d < bd) { bd = d; best = k; } }
       }
       return best;
     },
@@ -425,10 +524,14 @@ async function loadSections() {
 function pick(mx, my) {
   const t = state.transform;
   const x = (mx - t.x) / t.k, y = (my - t.y) / t.k;
+  if (state.level !== 'pais') {
+    const e = geo.exterior.ex;
+    if ((x - e.cx) ** 2 + (y - e.cy) ** 2 <= e.r ** 2) return 'zz';
+  }
   if (state.level === 'secao') {
     if (!sections) return null;
     // raio de captura de ~8 px de tela
-    const k = sections.nearest(x, y, 8 / t.k);
+    const k = sections.nearest(x, y, 8 / t.k, t.k);
     return k >= 0 ? k : null;
   }
   const feats = geo[state.level];
@@ -525,23 +628,11 @@ async function setLevel(lv) {
     await loadSections();
     sections.colors = null;
   }
-  $('#exterior').hidden = lv === 'pais';
   syncMapmodes(); updateScale(); draw();
-}
-
-function updateExteriorButton() {
-  const btn = $('#exterior');
-  if (btn.hidden) return;
-  btn.querySelector('svg').style.background = colorOf(S.el.zz);
-  btn.classList.toggle('selected', state.selected === 'zz');
 }
 
 function setupUI() {
   document.querySelectorAll('.levels button').forEach(b => b.addEventListener('click', () => setLevel(b.dataset.level)));
-  const ext = $('#exterior');
-  ext.addEventListener('click', () => openPanel('zz'));
-  ext.addEventListener('mousemove', ev => showTooltip(ev.clientX, ev.clientY, 'zz'));
-  ext.addEventListener('mouseleave', hideTooltip);
   $('#panel-close').addEventListener('click', closePanel);
   window.addEventListener('resize', resize);
   window.addEventListener('keydown', ev => { if (ev.key === 'Escape') closePanel(); });
@@ -550,15 +641,15 @@ function setupUI() {
   canvas.addEventListener('mousedown', ev => { down = [ev.clientX, ev.clientY]; });
   canvas.addEventListener('mousemove', ev => {
     const id = pick(ev.clientX, ev.clientY);
-    if (id !== state.hover) { state.hover = id; scheduleDraw(); }
+    if (id !== state.hover) { state.hover = id; scheduleOverlay(); }
     canvas.classList.toggle('hovering', id != null);
     if (id != null) showTooltip(ev.clientX, ev.clientY, id); else hideTooltip();
   });
-  canvas.addEventListener('mouseleave', () => { state.hover = null; hideTooltip(); scheduleDraw(); });
+  canvas.addEventListener('mouseleave', () => { state.hover = null; hideTooltip(); scheduleOverlay(); });
   canvas.addEventListener('click', ev => {
     if (down && Math.hypot(ev.clientX - down[0], ev.clientY - down[1]) > 4) return;
     const id = pick(ev.clientX, ev.clientY);
-    if (id != null) openPanel(id);
+    if (id != null) { hideTooltip(); openPanel(id); }
   });
 }
 
@@ -583,14 +674,14 @@ function closePanel() {
   state.selected = null;
   $('#panel').hidden = true;
   document.body.classList.remove('panel-open');
-  draw();
+  drawOverlay();
 }
 
 async function openPanel(id) {
   state.selected = id;
   $('#panel').hidden = false;
   document.body.classList.add('panel-open');
-  draw();
+  drawOverlay();
   const body = $('#panel-body');
   body.innerHTML = '<div class="empty">Carregando…</div>';
   let pc;   // contexto do painel
@@ -598,7 +689,7 @@ async function openPanel(id) {
     if (state.level === 'secao' && typeof id === 'number') {
       const inf = sections.info(id);
       const [sd] = await Promise.all([loadSecDetail(inf.mun), loadCand('br'), loadCand(inf.uf)]);
-      const d = sd[`${inf.z}-${inf.s}`];
+      const d = sd[`${inf.z}-${inf.s}`];  // {cargo: [[aptos, comp, válidos, brancos, nulos], {número: votos}]}
       $('#panel-sub').textContent = `${titleCase(inf.munName)} (${inf.uf.toUpperCase()}) · Zona ${inf.z}`;
       $('#panel-title').textContent = `Seção ${inf.s}`;
       // converter número -> sq
@@ -606,11 +697,11 @@ async function openPanel(id) {
         const m = {}; for (const [sq, c] of Object.entries(cand[scope])) if (c[4] === cg) m[c[1]] = sq; return m;
       };
       const c = {};
-      for (const [cg, v] of Object.entries((d && d.c) || {})) {
+      for (const [cg, [t, v]] of Object.entries(d || {})) {
         const map = byNum(cg === '1' ? 'br' : inf.uf, +cg);
-        c[cg] = { t: v.t, v: Object.entries(v.v).filter(([n]) => map[n]).map(([n, vv]) => [map[n], vv]).sort((a, b) => b[1] - a[1]) };
+        c[cg] = { t, v: Object.entries(v).filter(([n]) => map[n]).map(([n, vv]) => [map[n], vv]).sort((a, b) => b[1] - a[1]) };
       }
-      pc = { id, kind: 'secao', uf: inf.uf, detail: { c }, loc: d ? d.loc : '', tabs: [1, 3, 5] };
+      pc = { id, kind: 'secao', uf: inf.uf, detail: { c }, loc: inf.loc, tabs: [1, 3, 5] };
     } else {
       const e = S.el[id];
       const detail = await loadDetail(id);
@@ -758,6 +849,24 @@ $('#panel-body').addEventListener('click', ev => {
   if (act === 'pnone') { panelState.parties = new Set(); renderPanel(); }
   if (act === 'pmore') { $('#party-chips').classList.remove('collapsed'); b.remove(); }
 });
+
+// gancho para testes automatizados: centraliza o mapa em [lon, lat] com zoom k
+window.__mapaT = () => state.transform;
+window.__mapa = {
+  redraw() { draw(); return lastDrawMs; },
+  sectionScreen(i) {
+    const t = state.transform, [x, y] = sections.pos(i, t.k);
+    return [x * t.k + t.x, y * t.k + t.y];
+  },
+  nearestSection(lon, lat) {
+    const [x, y] = projection([lon, lat]);
+    return sections.nearest(x, y, 5, state.transform.k);
+  },
+  zoomTo(lon, lat, k) {
+    const [x, y] = projection([lon, lat]);
+    d3.select(canvas).call(zoom.transform, d3.zoomIdentity.translate(W / 2 - x * k, H / 2 - y * k).scale(k));
+  },
+};
 
 init().catch(err => {
   $('#loading-text').textContent = 'Erro ao carregar: ' + err.message;

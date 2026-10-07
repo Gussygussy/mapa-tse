@@ -302,7 +302,7 @@ for mun, info in MUNS.items():
     c[1] = {'t': MUN_T[mun][1], 'v': pv}
     for cg in cargos_uf(uf):
         votes = MUN_V.get(mun, {}).get(cg, {})
-        c[cg] = {'t': MUN_T[mun][cg], 'v': sorted([[sq, v] for sq, v in votes.items()], key=lambda r: -r[1]),
+        c[cg] = {'t': MUN_T[mun][cg], 'v': sorted([[sq, v] for sq, v in votes.items() if v > 0], key=lambda r: -r[1]),
                  'nv': uf_detail[uf][cg]['nv']}
     gov = gov_summary(c[3]['v'], c[3]['t'][2], cand_party(uf))
     put(mun, info['n'], uf, c[1], gov)
@@ -429,10 +429,10 @@ for uf in UFS:
                'pt': pres.get('13', 0), 'pl': pres.get('22', 0), 'gp': gp, 'gm': gm}
         for c_, val in row.items():
             cols[c_].append(val)
+        # {cargo: [totais, {número: votos}]}; brancos/nulos (95/96/97) já estão nos totais
         details[mun][f'{z}-{s}'] = {
-            'loc': locs[loc_idx[lk]],
-            'c': {str(cg): {'t': SEC_T[k].get(cg), 'v': {num: vv for num, vv in v.get(cg, {}).items() if vv}}
-                  for cg in (1, 3, 5) if SEC_T[k].get(cg)}}
+            str(cg): [SEC_T[k][cg], {num: vv for num, vv in v.get(cg, {}).items() if vv and num not in ('95', '96', '97')}]
+            for cg in (1, 3, 5) if SEC_T[k].get(cg)}
     cols['locs'] = locs
     cols['muns'] = munl
     cols['parties'] = parties
