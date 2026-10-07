@@ -2,8 +2,11 @@
 
 Mapa interativo (modo escuro) dos resultados do **1º turno das eleições gerais de 2026**, com comparação com 2022.
 
-- **Níveis:** País, Estado, Município, Zona eleitoral e Seção (um ponto por local de votação; seções no mesmo local ficam agrupadas, )
-- **Ruas (OpenStreetMap):** contorno claro das ruas em todos os níveis (por cima das cores; no nível Seção, ao fundo), com opção para ligar/desligar no painel de filtros. O TSE não publica o desenho das zonas, então a área de cada zona é aproximada: polígonos de Voronoi dos locais de votação, recortados pelos limites dos municípios. O *Exterior* é um círculo no Atlântico.
+- **Níveis:** País, Estado, Município, Zona eleitoral e Seção.
+  - Zona: o TSE não publica o desenho das zonas, então a área de cada zona é aproximada (polígonos de Voronoi dos locais de votação, recortados pelos limites dos municípios).
+  - Seção: um ponto por local de votação; seções no mesmo local ficam agrupadas.
+  - O *Exterior* é um círculo no Atlântico.
+- **Ruas (OpenStreetMap):** contorno claro das ruas em todos os níveis (por cima das cores; no nível Seção, ao fundo), com opção para ligar/desligar no painel de filtros.
 - **Modos de mapa** (canto inferior esquerdo):
   - votos válidos e % de votos válidos sobre o eleitorado;
   - votos (comparecimento) e % de comparecimento;
