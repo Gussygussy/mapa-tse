@@ -116,7 +116,7 @@ let W = 0, H = 0, DPR = 1;
 let projection, baseScale;
 
 function resize() {
-  DPR = Math.min(2, window.devicePixelRatio || 1);   // acima de 2x o custo cresce sem ganho visível
+  DPR = window.devicePixelRatio || 1;
   W = window.innerWidth; H = window.innerHeight;
   for (const c of [canvas, overlay, snap]) { c.width = W * DPR; c.height = H * DPR; }
   draw();
@@ -181,36 +181,10 @@ async function init() {
   geo.estado = mk(ufFeats).concat(exterior);
   geo.municipio = mk(munFeats).concat(exterior);
   geo.zona = mk(zonaFeats).concat(exterior);
+  geo.zonaMesh = new Path2D(); d3.geoPath(projection, geo.zonaMesh)(topojson.mesh(zonaTopo, zonaObj, (a, b) => a !== b));
   geo.ufMesh = new Path2D(); d3.geoPath(projection, geo.ufMesh)(ufMesh);
   geo.outline = new Path2D(); d3.geoPath(projection, geo.outline)(brOutline);
-
-  // Desempenho: versão simplificada (LOD) dos municípios e zonas para zoom afastado, e malhas
-  // divididas por UF para desenhar só as visíveis.
-  const ufBox = Object.fromEntries(geo.estado.map(g => [g.id, g.bbox]));
-  const munUf = g => UF_IBGE[String(g.properties.codarea).slice(0, 2)];
-  const zonaUf = g => g.properties.id.slice(1, 3);
-  const meshChunks = (topo, obj, ufOf) => Object.keys(ufBox).filter(u => u !== 'zz').map(u => {
-    const p = new Path2D();
-    d3.geoPath(projection, p)(topojson.mesh(topo, obj, (a, b) => a !== b && ufOf(a) === u));
-    return { uf: u, bbox: ufBox[u], path: p };
-  });
-  geo.munMesh = meshChunks(munTopo, munObj, munUf);
-  geo.zonaMesh = meshChunks(zonaTopo, zonaObj, zonaUf);
-  const lowOf = (topo, obj, list, ufOf) => {
-    const pre = topojson.presimplify(topo);
-    const low = topojson.simplify(pre, topojson.quantile(pre, LOD_QUANTILE));
-    const lobj = Object.values(low.objects)[0];
-    const byId = new Map(list.map(g => [g.id, g]));
-    for (const f of topojson.feature(low, lobj).features) {
-      const id = obj === zonaObj ? f.properties.id : ibge2tse[f.properties.codarea];
-      if (obj === zonaObj) rewind(f);
-      const g = byId.get(id);
-      if (g) { g.pathLow = new Path2D(); d3.geoPath(projection, g.pathLow)(f); }
-    }
-    return meshChunks(low, lobj, ufOf);
-  };
-  geo.munMeshLow = lowOf(munTopo, munObj, geo.municipio, munUf);
-  geo.zonaMeshLow = lowOf(zonaTopo, zonaObj, geo.zona, zonaUf);
+  geo.munMesh = new Path2D(); d3.geoPath(projection, geo.munMesh)(topojson.mesh(munTopo, munObj, (a, b) => a !== b));
 
   buildMapmodes();
   setupZoom();
@@ -223,8 +197,6 @@ async function init() {
 }
 
 // ------------------------------------------------------------------ zoom
-// abaixo deste zoom usa a geometria simplificada (o erro fica menor que ~1 px na tela)
-const LOD_K = 4, LOD_QUANTILE = 0.85;
 let zoom;
 function fitView() {
   const pad = 20;
@@ -251,13 +223,13 @@ function scheduleDraw() {
 // (transformada) e só redesenha tudo quando o movimento para.
 let zoomRaf = false, zoomIdle = null;
 function scheduleZoomDraw() {
-  if (lastDrawMs < 12 || !snapT) { scheduleDraw(); return; }
+  if (lastDrawMs < 35 || !snapT) { scheduleDraw(); return; }
   if (!zoomRaf) {
     zoomRaf = true;
     requestAnimationFrame(() => { zoomRaf = false; quickDraw(); });
   }
   clearTimeout(zoomIdle);
-  zoomIdle = setTimeout(draw, 220);
+  zoomIdle = setTimeout(draw, 160);
 }
 function quickDraw() {
   const t = state.transform, s = t.k / snapT.k;
@@ -421,38 +393,19 @@ function renderLegend() {
 }
 
 // ------------------------------------------------------------------ desenho
-// Desenho completo direto na tela; depois a imagem é guardada (snap) para o zoom/arraste.
-// (Desenhar em etapas ao longo de vários quadros ou num buffer separado foi testado e piorou:
-// o Chrome pinta os comandos do canvas na hora do quadro e a cópia entre canvases é cara.)
 function draw() {
   if (!projection || !scale) return;
   clearTimeout(zoomIdle);
   const t0 = performance.now();
-  const tr = state.transform, t = { k: tr.k, x: tr.x, y: tr.y };
-  const steps = renderSteps(ctx, t);
-  while (!steps.next().done);
-  snapCtx.setTransform(1, 0, 0, 1, 0, 0);
-  snapCtx.clearRect(0, 0, snap.width, snap.height);
-  snapCtx.drawImage(canvas, 0, 0);
-  snapT = t;
-  lastDrawMs = performance.now() - t0;
-  drawOverlay();
-}
-const drawNow = draw;
-
-function* renderSteps(ctx, t) {
+  const t = state.transform;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = '#0b0e13';
+  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--sea') || '#0b0e13';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(DPR * t.k, 0, 0, DPR * t.k, DPR * t.x, DPR * t.y);
   const px = 1 / t.k;  // 1 pixel de tela em coordenadas do mapa
   // recorte de visibilidade
   const vx0 = -t.x / t.k, vy0 = -t.y / t.k, vx1 = (W - t.x) / t.k, vy1 = (H - t.y) / t.k;
   const visible = b => !(b[2] < vx0 || b[0] > vx1 || b[3] < vy0 || b[1] > vy1);
-  const low = t.k < LOD_K;
-  function* strokeMesh(chunks, lowChunks) {
-    for (const c of (low ? lowChunks : chunks)) if (visible(c.bbox)) { ctx.stroke(c.path); yield; }
-  }
 
   if (state.level === 'secao') {
     if (worldBase) {
@@ -460,33 +413,29 @@ function* renderSteps(ctx, t) {
       ctx.strokeStyle = 'rgba(255,255,255,.1)'; ctx.lineWidth = 0.6 * px; ctx.stroke(worldBase.borders);
     }
     for (const g of geo.estado) { if (g.id !== 'zz') { ctx.fillStyle = '#1b2029'; ctx.fill(g.path); } }
-    yield;
-    if (showStreets) { drawTiles(ctx, t, [vx0, vy0, vx1, vy1]); yield; }
+    if (showStreets) drawTiles(ctx, t, [vx0, vy0, vx1, vy1]);
     // contorno dos municípios (mais visível conforme o zoom aumenta)
     ctx.strokeStyle = `rgba(255,255,255,${Math.min(0.38, 0.17 + 0.035 * Math.log2(Math.max(1, t.k)))})`;
-    ctx.lineWidth = 0.6 * px; yield* strokeMesh(geo.munMesh, geo.munMeshLow);
-    if (locais) yield* locais.drawSteps(ctx, t, px, [vx0, vy0, vx1, vy1]);
+    ctx.lineWidth = 0.6 * px; ctx.stroke(geo.munMesh);
+    if (locais) locais.draw(ctx, t, px, [vx0, vy0, vx1, vy1]);
     ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.ufMesh);
     if (extCities) drawExtCities(ctx, t, px, [vx0, vy0, vx1, vy1]);
   }
   const feats = state.level === 'secao' ? [] : geo[state.level];
-  let n = 0;
   for (const g of feats) {
     if (!visible(g.bbox)) continue;
     ctx.fillStyle = colorOf(S.el[g.id]);
-    ctx.fill(low && g.pathLow ? g.pathLow : g.path);
-    if (++n % 250 === 0) yield;
+    ctx.fill(g.path);
   }
-  yield;
   // nos níveis de polígonos, as ruas ficam por cima das cores como linhas claras
-  if (feats.length && showStreets) { drawTiles(ctx, t, [vx0, vy0, vx1, vy1]); yield; }
+  if (feats.length && showStreets) drawTiles(ctx, t, [vx0, vy0, vx1, vy1]);
   if (state.level === 'zona') {
     // divisória bem clara entre municípios dentro da mesma zona; bordas das zonas por cima
-    ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 0.5 * px; yield* strokeMesh(geo.munMesh, geo.munMeshLow);
-    ctx.strokeStyle = 'rgba(14,17,22,.8)'; ctx.lineWidth = 0.7 * px; yield* strokeMesh(geo.zonaMesh, geo.zonaMeshLow);
+    ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 0.5 * px; ctx.stroke(geo.munMesh);
+    ctx.strokeStyle = 'rgba(14,17,22,.8)'; ctx.lineWidth = 0.7 * px; ctx.stroke(geo.zonaMesh);
     ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.4 * px; ctx.stroke(geo.ufMesh);
   } else if (state.level === 'municipio') {
-    ctx.strokeStyle = 'rgba(14,17,22,.55)'; ctx.lineWidth = 0.5 * px; yield* strokeMesh(geo.munMesh, geo.munMeshLow);
+    ctx.strokeStyle = 'rgba(14,17,22,.55)'; ctx.lineWidth = 0.5 * px; ctx.stroke(geo.munMesh);
     ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.4 * px; ctx.stroke(geo.ufMesh);
   } else if (state.level === 'estado') {
     ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.2 * px; ctx.stroke(geo.ufMesh);
@@ -494,6 +443,12 @@ function* renderSteps(ctx, t) {
   ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.outline);
   // no nível Seção o exterior aparece como pontos no mapa, sem o círculo
   if (state.level !== 'pais' && !(state.level === 'secao' && extCities)) drawExterior(ctx, px);
+  snapCtx.setTransform(1, 0, 0, 1, 0, 0);
+  snapCtx.clearRect(0, 0, snap.width, snap.height);
+  snapCtx.drawImage(canvas, 0, 0);
+  snapT = { k: t.k, x: t.x, y: t.y };
+  lastDrawMs = performance.now() - t0;
+  drawOverlay();
 }
 
 function drawExterior(c, px) {
@@ -627,22 +582,18 @@ async function loadLocais() {
       for (let k = 0; k < N; k++) { const c = colorOf(elemOf(k)); let a = by.get(c); if (!a) by.set(c, a = []); a.push(k); }
       this.colors = by;
     },
-    *drawSteps(c, t, px, [vx0, vy0, vx1, vy1]) {
+    draw(c, t, px, [vx0, vy0, vx1, vy1]) {
       if (!this.colors) this.recolor();
-      const r = radiusPx(t.k) * px, small = radiusPx(t.k) < 2.5;
+      const r = radiusPx(t.k) * px;
       for (const [col, idx] of this.colors) {
         c.fillStyle = col;
         c.beginPath();
-        let n = 0;
         for (const k of idx) {
           const x = X[k], y = Y[k];
           if (x < vx0 || x > vx1 || y < vy0 || y > vy1) continue;
-          // abaixo de ~2,5 px o círculo é indistinguível de um quadrado, que é bem mais rápido
-          if (small) c.rect(x - r, y - r, 2 * r, 2 * r); else { c.moveTo(x + r, y); c.arc(x, y, r, 0, 2 * Math.PI); }
-          if (++n % 4000 === 0) { c.fill(); yield; c.beginPath(); }
+          c.moveTo(x + r, y); c.arc(x, y, r, 0, 2 * Math.PI);
         }
         c.fill();
-        yield;
       }
     },
     nearest(mx, my, maxDist) {
@@ -831,7 +782,6 @@ function setupUI() {
   let down = null;
   canvas.addEventListener('mousedown', ev => { down = [ev.clientX, ev.clientY]; });
   canvas.addEventListener('mousemove', ev => {
-    if (ev.buttons) { hideTooltip(); return; }   // arrastando: não procura elemento sob o mouse
     const id = pick(ev.clientX, ev.clientY);
     if (id !== state.hover) { state.hover = id; scheduleOverlay(); }
     canvas.classList.toggle('hovering', id != null);
@@ -1152,7 +1102,7 @@ window.__mapa = {
     const k = locais.nearest(x, y, 5), t = state.transform;
     return [locais.X[k] * t.k + t.x, locais.Y[k] * t.k + t.y];
   },
-  redraw() { drawNow(); return lastDrawMs; },
+  redraw() { draw(); return lastDrawMs; },
   zoomTo(lon, lat, k) {
     const [x, y] = projection([lon, lat]);
     d3.select(canvas).call(zoom.transform, d3.zoomIdentity.translate(W / 2 - x * k, H / 2 - y * k).scale(k));
