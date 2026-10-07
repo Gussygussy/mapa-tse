@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mapa Eleições 2026</title>
+<meta name="description" content="Mapa interativo dos resultados do 1º turno das eleições gerais de 2026 (dados do TSE).">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="map"></canvas>
+
+<div id="loading" class="loading"><div class="spinner"></div><span id="loading-text">Carregando mapa…</span></div>
+
+<nav id="levels" class="levels" aria-label="Nível do mapa">
+  <button data-level="pais">País</button>
+  <button data-level="estado" class="active">Estado</button>
+  <button data-level="municipio">Município</button>
+  <button data-level="secao">Seção</button>
+</nav>
+
+<button id="exterior" class="exterior" title="Exterior">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.5" fill="none" stroke="currentColor" stroke-width="1.6"/><ellipse cx="12" cy="12" rx="4.2" ry="9.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M2.8 9h18.4M2.8 15h18.4" stroke="currentColor" stroke-width="1.6"/></svg>
+  <span>Exterior</span>
+</button>
+
+<div id="mapmodes" class="mapmodes">
+  <div class="legend" id="legend"></div>
+  <div class="mm-title" id="mm-title"></div>
+  <div class="mm-grid" id="mm-grid"></div>
+</div>
+
+<div id="tooltip" class="tooltip" hidden></div>
+
+<aside id="panel" class="panel" hidden>
+  <header class="panel-head">
+    <div>
+      <div class="panel-sub" id="panel-sub"></div>
+      <h1 id="panel-title"></h1>
+    </div>
+    <button id="panel-close" class="icon-btn" aria-label="Fechar">✕</button>
+  </header>
+  <div class="panel-body" id="panel-body"></div>
+</aside>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/topojson/3.0.2/topojson.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

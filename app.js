@@ -1,0 +1,766 @@
+/* Mapa Eleições 2026 — 1º turno. Dados: TSE (resultados e dados abertos), malhas: IBGE. */
+(() => {
+'use strict';
+
+// ------------------------------------------------------------------ utilidades
+const $ = s => document.querySelector(s);
+const fmtInt = new Intl.NumberFormat('pt-BR');
+const fmtPct = (x, d = 2) => (x * 100).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d }) + '%';
+const fmtPP = (x, d = 1) => (x >= 0 ? '+' : '−') + Math.abs(x * 100).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtCompact = x => x >= 1e6 ? (x / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' mi'
+  : x >= 1e3 ? (x / 1e3).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' mil' : fmtInt.format(Math.round(x));
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const titleCase = s => s.toLowerCase().replace(/(^|[\s(/-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase())
+  .replace(/\b(Da|De|Do|Das|Dos|E)\b/g, w => w.toLowerCase());
+const fetchJSON = url => fetch(url).then(r => { if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); });
+
+function quantile(sorted, p) {
+  if (!sorted.length) return 0;
+  const i = (sorted.length - 1) * p, lo = Math.floor(i), hi = Math.ceil(i);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo);
+}
+// arredonda para um número "bonito" para cima (limites de legenda)
+function niceUp(x) {
+  if (x <= 0) return x;
+  const e = Math.pow(10, Math.floor(Math.log10(x)));
+  for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (m * e >= x) return m * e;
+  return 10 * e;
+}
+
+// ------------------------------------------------------------------ partidos
+const PARTY_COLORS = {
+  PT: '#d7263d', PL: '#2453c4', 'UNIÃO': '#22b5e6', PSD: '#f5a524', MDB: '#2fa35b', PP: '#7b61d1',
+  REPUBLICANOS: '#16b39a', PSB: '#ff7a1a', PSDB: '#5b8fd9', PDT: '#e2558f', NOVO: '#ff9d4d', PSOL: '#b23aa8',
+  PODE: '#42c46b', AVANTE: '#9d5cc9', SOLIDARIEDADE: '#f2c230', 'PC do B': '#9e1b28', PCdoB: '#9e1b28', PV: '#7cc242',
+  REDE: '#2bb3a6', CIDADANIA: '#e85d75', PRD: '#8a94a6', AGIR: '#c08b5c', MOBILIZA: '#a3a35c', DC: '#5c7fa3',
+  PRTB: '#4e8a5f', PMB: '#d48ac7', PCO: '#a63d3d', PSTU: '#c44', UP: '#b85454', PCB: '#8f2a2a', 'MISSÃO': '#c9a227',
+  DEMOCRATA: '#3f6fb5', PMN: '#6fa36f',
+};
+function partyColor(p) {
+  if (PARTY_COLORS[p]) return PARTY_COLORS[p];
+  let h = 0; for (const c of p) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return d3.hsl(h % 360, 0.55, 0.55).formatHex();
+}
+
+const STATUS = { E: 'Eleito', 2: '2º turno', N: 'Não eleito', S: 'Suplente', A: 'Anulado' };
+const STATUS_ORDER = ['E', '2', 'N', 'S', 'A'];
+const CARGOS = [
+  { id: 1, nome: 'Presidente' }, { id: 3, nome: 'Governador' }, { id: 5, nome: 'Senador' },
+  { id: 6, nome: 'Dep. Federal' }, { id: 7, nome: 'Dep. Estadual' },
+];
+
+// ------------------------------------------------------------------ métricas
+// get(e) recebe {t26,t22,p26,p22,g} e retorna número (ou null)
+const share = p => (p && p[0] + p[1] > 0) ? p[0] / (p[0] + p[1]) : null;
+const METRICS = [
+  { id: 'val', group: 'Participação', name: 'Votos válidos', kind: 'abs',
+    get: e => e.t26 ? e.t26[2] : null, icon: 'check' },
+  { id: 'pval', group: 'Participação', name: '% votos válidos (sobre o eleitorado)', kind: 'pct',
+    get: e => e.t26 && e.t26[0] ? e.t26[2] / e.t26[0] : null, icon: 'checkpct' },
+  { id: 'vot', group: 'Participação', name: 'Votos (comparecimento)', kind: 'abs',
+    get: e => e.t26 ? e.t26[1] : null, icon: 'urn' },
+  { id: 'pvot', group: 'Participação', name: '% votos (comparecimento)', kind: 'pct',
+    get: e => e.t26 && e.t26[0] ? e.t26[1] / e.t26[0] : null, icon: 'urnpct' },
+  { id: 'dval', group: 'Variação desde 2022', name: 'Δ Votos válidos vs 2022', kind: 'rel', diff: true,
+    get: e => e.t26 && e.t22 && e.t22[2] ? e.t26[2] / e.t22[2] - 1 : null, icon: 'check' },
+  { id: 'dpval', group: 'Variação desde 2022', name: 'Δ % votos válidos vs 2022', kind: 'pp', diff: true,
+    get: e => e.t26 && e.t22 && e.t26[0] && e.t22[0] ? e.t26[2] / e.t26[0] - e.t22[2] / e.t22[0] : null, icon: 'checkpct' },
+  { id: 'dvot', group: 'Variação desde 2022', name: 'Δ Votos vs 2022', kind: 'rel', diff: true,
+    get: e => e.t26 && e.t22 && e.t22[1] ? e.t26[1] / e.t22[1] - 1 : null, icon: 'urn' },
+  { id: 'dpvot', group: 'Variação desde 2022', name: 'Δ % votos vs 2022', kind: 'pp', diff: true,
+    get: e => e.t26 && e.t22 && e.t26[0] && e.t22[0] ? e.t26[1] / e.t26[0] - e.t22[1] / e.t22[0] : null, icon: 'urnpct' },
+  { id: 'pres', group: 'Presidente', name: 'Presidente: PT × PL', kind: 'pres',
+    get: e => share(e.p26), icon: 'pres' },
+  { id: 'dpres', group: 'Presidente', name: 'Presidente: variação PT × PL desde 2022', kind: 'dpres', diff: true,
+    get: e => { const a = share(e.p26), b = share(e.p22); return a == null || b == null ? null : a - b; }, icon: 'pres' },
+  { id: 'gov', group: 'Governador', name: 'Governador: partido mais votado', kind: 'gov',
+    get: e => e.g ? e.g[1] : null, icon: 'gov' },
+];
+const METRIC = Object.fromEntries(METRICS.map(m => [m.id, m]));
+
+const ICONS = {
+  check: '<path d="M5 12.5l4.2 4.2L19 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>',
+  checkpct: '<path d="M3 11l3.4 3.4L13 7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="15.5" cy="14.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="20.5" cy="20" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M21 13.5l-6 7" stroke="currentColor" stroke-width="1.4"/>',
+  urn: '<rect x="4" y="10" width="16" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 10V4h8v6M10 7h4" fill="none" stroke="currentColor" stroke-width="1.8"/>',
+  urnpct: '<rect x="2.5" y="11" width="12" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 11V6h6v5" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="17" cy="5.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="21" cy="11" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M21.6 4.5l-5.2 7.6" stroke="currentColor" stroke-width="1.4"/>',
+  pres: '<path d="M12 3a9 9 0 0 1 0 18z" fill="#d7263d"/><path d="M12 3a9 9 0 0 0 0 18z" fill="#2453c4"/>',
+  gov: '<path d="M4 20h16M6 20v-8M10 20v-8M14 20v-8M18 20v-8M3 10l9-6 9 6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+};
+
+// ------------------------------------------------------------------ estado
+const state = {
+  level: 'estado',
+  metric: 'pres',
+  selected: null,      // id do elemento selecionado
+  hover: null,
+  transform: d3.zoomIdentity,
+};
+let S = null;          // summary.json
+let geo = {};          // features
+let sections = null;   // dados de seções carregados
+const cand = {};       // escopo -> dicionário de candidatos
+const detailCache = new Map();
+
+// ------------------------------------------------------------------ canvas
+const canvas = $('#map');
+const ctx = canvas.getContext('2d');
+const hitCtx = document.createElement('canvas').getContext('2d');
+let W = 0, H = 0, DPR = 1;
+let projection, baseScale;
+
+function resize() {
+  DPR = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  draw();
+}
+
+// ------------------------------------------------------------------ carga inicial
+async function init() {
+  const [summary, ufTopo, munTopo] = await Promise.all([
+    fetchJSON('data/summary.json'), fetchJSON('data/geo/uf.json'), fetchJSON('data/geo/mun.json'),
+  ]);
+  S = summary;
+  // IBGE -> TSE
+  const ibge2tse = {};
+  for (const [id, e] of Object.entries(S.el)) if (e.ibge) ibge2tse[e.ibge] = id;
+  const UF_IBGE = { 11: 'ro', 12: 'ac', 13: 'am', 14: 'rr', 15: 'pa', 16: 'ap', 17: 'to', 21: 'ma', 22: 'pi', 23: 'ce', 24: 'rn', 25: 'pb',
+    26: 'pe', 27: 'al', 28: 'se', 29: 'ba', 31: 'mg', 32: 'es', 33: 'rj', 35: 'sp', 41: 'pr', 42: 'sc', 43: 'rs', 50: 'ms', 51: 'mt', 52: 'go', 53: 'df' };
+  const ufObj = Object.values(ufTopo.objects)[0];
+  const munObj = Object.values(munTopo.objects)[0];
+  const ufFeats = topojson.feature(ufTopo, ufObj).features;
+  ufFeats.forEach(f => f.id = UF_IBGE[f.properties.codarea]);
+  const munFeats = topojson.feature(munTopo, munObj).features;
+  munFeats.forEach(f => f.id = ibge2tse[f.properties.codarea]);
+  const brFeat = { type: 'Feature', id: 'br', geometry: topojson.merge(ufTopo, ufObj.geometries) };
+  const ufMesh = topojson.mesh(ufTopo, ufObj, (a, b) => a !== b);
+  const brOutline = topojson.mesh(ufTopo, ufObj, (a, b) => a === b);
+
+  projection = d3.geoMercator().fitExtent([[40, 40], [1000 - 40, 1000 - 40]], brFeat);
+  baseScale = projection.scale();
+  const mk = feats => feats.filter(f => f.id).map(f => {
+    const p = new Path2D(); d3.geoPath(projection, p)(f);
+    const [[x0, y0], [x1, y1]] = d3.geoPath(projection).bounds(f);
+    return { id: f.id, path: p, bbox: [x0, y0, x1, y1], area: (x1 - x0) * (y1 - y0) };
+  });
+  geo.pais = mk([brFeat]);
+  geo.estado = mk(ufFeats);
+  geo.municipio = mk(munFeats);
+  geo.ufMesh = new Path2D(); d3.geoPath(projection, geo.ufMesh)(ufMesh);
+  geo.outline = new Path2D(); d3.geoPath(projection, geo.outline)(brOutline);
+  geo.munMesh = new Path2D(); d3.geoPath(projection, geo.munMesh)(topojson.mesh(munTopo, munObj, (a, b) => a !== b));
+
+  buildMapmodes();
+  setupZoom();
+  setupUI();
+  resize();
+  fitView();
+  updateScale();
+  draw();
+  $('#loading').hidden = true;
+}
+
+// ------------------------------------------------------------------ zoom
+let zoom;
+function fitView() {
+  const pad = 20;
+  const avW = W - (state.selected ? 440 : 0);
+  const k = Math.min((avW - 2 * pad) / 1000, (H - 2 * pad) / 1000);
+  const t = d3.zoomIdentity.translate((avW - 1000 * k) / 2, (H - 1000 * k) / 2).scale(k);
+  d3.select(canvas).call(zoom.transform, t);
+}
+function setupZoom() {
+  zoom = d3.zoom().scaleExtent([0.2, 6000])
+    .on('start', ev => { if (ev.sourceEvent && ev.sourceEvent.type === 'mousedown') canvas.classList.add('dragging'); })
+    .on('zoom', ev => { state.transform = ev.transform; scheduleDraw(); hideTooltip(); })
+    .on('end', () => canvas.classList.remove('dragging'));
+  d3.select(canvas).call(zoom).on('dblclick.zoom', null);
+}
+
+let rafPending = false;
+function scheduleDraw() {
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(() => { rafPending = false; draw(); });
+}
+
+// ------------------------------------------------------------------ escalas
+// Limites a partir dos dados do nível atual (percentis), nunca 0%/100% fixos.
+let scale = null;
+function currentElements() {
+  if (state.level === 'secao') return null;
+  const ids = state.level === 'pais' ? ['br'] : geo[state.level].map(g => g.id);
+  if (state.level !== 'pais') ids.push('zz');
+  return ids.map(id => [id, S.el[id]]).filter(([, e]) => e);
+}
+function metricValues() {
+  const m = METRIC[state.metric];
+  if (state.level === 'secao') {
+    if (!sections) return [];
+    return sections.values(m);
+  }
+  return currentElements().map(([, e]) => m.get(e)).filter(v => v != null && isFinite(v));
+}
+
+const SEQ = d3.interpolateViridis;
+const DIV = t => d3.interpolateBrBG(t);
+const PRES = t => d3.interpolateRdBu(1 - t);       // 0 = PL (azul), 1 = PT (vermelho)
+const NO_DATA = '#3a404c';
+const GOV_BASE = d3.rgb('#252a33');
+
+function updateScale() {
+  const m = METRIC[state.metric];
+  const vals = metricValues().slice().sort((a, b) => a - b);
+  const single = state.level === 'pais';
+  let sc = { kind: m.kind };
+  if (m.kind === 'abs') {
+    const pos = vals.filter(v => v > 0);
+    let lo = quantile(pos, 0.02), hi = quantile(pos, 0.98);
+    if (single || !(hi > lo)) { lo = (pos[0] || 1) / 2; hi = (pos[pos.length - 1] || 2) * 2; }
+    const l = d3.scaleLog().domain([lo, hi]).clamp(true);
+    sc.color = v => v > 0 ? SEQ(l(v)) : NO_DATA;
+    sc.lo = lo; sc.hi = hi; sc.ramp = SEQ; sc.fmt = fmtCompact;
+  } else if (m.kind === 'pct') {
+    let lo = quantile(vals, 0.02), hi = quantile(vals, 0.98);
+    if (single || !(hi > lo)) { const v = vals[0] || 0.5; lo = v - 0.05; hi = v + 0.05; }
+    lo = Math.floor(lo * 100) / 100; hi = Math.ceil(hi * 100) / 100;
+    const l = d3.scaleLinear().domain([lo, hi]).clamp(true);
+    sc.color = v => SEQ(l(v)); sc.lo = lo; sc.hi = hi; sc.ramp = SEQ; sc.fmt = v => fmtPct(v, 0);
+  } else if (['rel', 'pp', 'dpres', 'pres'].includes(m.kind)) {
+    const center = m.kind === 'pres' ? 0.5 : 0;
+    let ext;
+    if (m.kind === 'pres') {
+      // presidente: limites nos percentis 25–75, simétricos em torno de 50% (empate = cor neutra)
+      ext = Math.max(Math.abs(quantile(vals, 0.25) - center), Math.abs(quantile(vals, 0.75) - center));
+    } else {
+      const dev = vals.map(v => Math.abs(v - center)).sort((a, b) => a - b);
+      ext = quantile(dev, 0.98);
+    }
+    if (single || !(ext > 0)) ext = Math.max(Math.abs((vals[0] ?? center) - center) * 1.5, 0.01);
+    ext = niceUp(ext * 100) / 100;
+    const l = d3.scaleLinear().domain([center - ext, center + ext]).clamp(true);
+    const ramp = m.kind === 'pres' || m.kind === 'dpres' ? PRES : DIV;
+    sc.color = v => ramp(l(v)); sc.lo = center - ext; sc.hi = center + ext; sc.center = center; sc.ramp = ramp;
+    sc.fmt = m.kind === 'pres' ? (v => fmtPct(v, 0)) : (v => fmtPP(v, ext < 0.05 ? 1 : 0) + (m.kind === 'rel' ? '%' : ' p.p.'));
+    if (m.kind === 'pres') sc.labels = ['PL', 'PT'];
+    if (m.kind === 'dpres') sc.labels = ['→ PL', '→ PT'];
+  } else if (m.kind === 'gov') {
+    let hi = quantile(vals, 0.95);
+    if (single || !(hi > 0)) hi = Math.max(vals[0] || 0.2, 0.05);
+    hi = niceUp(hi * 100) / 100;
+    const l = d3.scaleLinear().domain([0, hi]).clamp(true);
+    sc.colorFor = (party, margin) => d3.interpolateRgb(GOV_BASE, partyColor(party))(0.3 + 0.7 * l(margin));
+    sc.hi = hi;
+    sc.parties = state.level === 'secao' ? (sections ? sections.govParties() : [])
+      : [...new Set(currentElements().map(([, e]) => e.g && e.g[0]).filter(Boolean))];
+  }
+  scale = sc;
+  renderLegend();
+}
+
+function colorOf(e) {
+  if (!e) return NO_DATA;
+  const m = METRIC[state.metric];
+  if (m.kind === 'gov') return e.g ? scale.colorFor(e.g[0], e.g[1]) : NO_DATA;
+  const v = m.get(e);
+  return v == null || !isFinite(v) ? NO_DATA : scale.color(v);
+}
+
+function renderLegend() {
+  const m = METRIC[state.metric];
+  $('#mm-title').textContent = m.name;
+  const L = $('#legend');
+  if (m.kind === 'gov') {
+    const ps = (scale.parties || []).slice().sort();
+    L.innerHTML = `<div class="swatches">${ps.map(p => `<span class="sw"><i style="background:${partyColor(p)}"></i>${esc(p)}</span>`).join('')}</div>
+      <div class="note">Intensidade = margem de vitória (cor plena ≥ ${fmtPct(scale.hi, 0)} dos válidos)</div>`;
+    return;
+  }
+  const stops = d3.range(0, 1.0001, 0.1).map(t => scale.ramp(t)).join(',');
+  const mid = scale.center != null ? scale.fmt(scale.center).replace(/^[+−]/, '') : '';
+  const lab = scale.labels || ['', ''];
+  L.innerHTML = `<div class="bar" style="background:linear-gradient(90deg,${stops})"></div>
+    <div class="ticks"><span>≤ ${scale.fmt(scale.lo)} ${lab[0]}</span>${mid ? `<span>${mid}</span>` : ''}<span>≥ ${scale.fmt(scale.hi)} ${lab[1]}</span></div>
+    ${m.kind === 'abs' ? '<div class="note">Escala logarítmica</div>' : ''}
+    ${m.kind === 'dpres' ? '<div class="note">Variação da fatia do PT nos votos PT+PL</div>' : ''}
+    ${m.kind === 'pres' ? '<div class="note">Fatia do PT nos votos PT+PL</div>' : ''}`;
+}
+
+// ------------------------------------------------------------------ desenho
+function draw() {
+  if (!projection) return;
+  const t = state.transform;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--sea') || '#0b0e13';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(DPR * t.k, 0, 0, DPR * t.k, DPR * t.x, DPR * t.y);
+  const px = 1 / t.k;  // 1 pixel de tela em coordenadas do mapa
+  // recorte de visibilidade
+  const vx0 = -t.x / t.k, vy0 = -t.y / t.k, vx1 = (W - t.x) / t.k, vy1 = (H - t.y) / t.k;
+  const visible = b => !(b[2] < vx0 || b[0] > vx1 || b[3] < vy0 || b[1] > vy1);
+
+  if (state.level === 'secao') {
+    for (const g of geo.estado) { ctx.fillStyle = '#1b2029'; ctx.fill(g.path); }
+    if (t.k > 4) { ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.lineWidth = 0.6 * px; ctx.stroke(geo.munMesh); }
+    if (sections) sections.draw(ctx, t, px, [vx0, vy0, vx1, vy1]);
+    ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.ufMesh);
+    ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.stroke(geo.outline);
+  } else {
+    const feats = geo[state.level];
+    for (const g of feats) {
+      if (!visible(g.bbox)) continue;
+      ctx.fillStyle = colorOf(S.el[g.id]);
+      ctx.fill(g.path);
+    }
+    if (state.level === 'municipio') {
+      ctx.strokeStyle = 'rgba(14,17,22,.55)'; ctx.lineWidth = 0.5 * px; ctx.stroke(geo.munMesh);
+      ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.4 * px; ctx.stroke(geo.ufMesh);
+    } else if (state.level === 'estado') {
+      ctx.strokeStyle = 'rgba(14,17,22,.95)'; ctx.lineWidth = 1.2 * px; ctx.stroke(geo.ufMesh);
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 1 * px; ctx.stroke(geo.outline);
+    for (const [id, col, w] of [[state.hover, 'rgba(255,255,255,.75)', 1.5], [state.selected, '#fff', 2.5]]) {
+      const g = id && feats.find(f => f.id === id);
+      if (g) { ctx.strokeStyle = col; ctx.lineWidth = w * px; ctx.stroke(g.path); }
+    }
+  }
+  updateExteriorButton();
+}
+
+// ------------------------------------------------------------------ seções
+// Pontos por seção eleitoral (coordenadas do local de votação).
+async function loadSections() {
+  if (sections) return sections;
+  const ufs = Object.keys(S.uf).filter(u => u !== 'zz');
+  let done = 0;
+  $('#loading').hidden = false;
+  $('#loading-text').textContent = `Carregando seções… 0/${ufs.length}`;
+  const parts = await Promise.all(ufs.map(uf => fetchJSON(`data/s/${uf}.json`).then(d => {
+    done++; $('#loading-text').textContent = `Carregando seções… ${done}/${ufs.length}`; d.uf = uf; return d;
+  })));
+  $('#loading').hidden = true;
+  // achatar em typed arrays
+  const N = parts.reduce((a, p) => a + p.s.length, 0);
+  const X = new Float32Array(N), Y = new Float32Array(N);
+  const cols = ['apt', 'comp', 'val', 'bra', 'nul', 'pt', 'pl', 'gm'];
+  const A = Object.fromEntries(cols.map(c => [c, new Int32Array(N)]));
+  const GP = new Array(N), REF = new Int32Array(N), PART = new Uint8Array(N);
+  let i = 0;
+  parts.forEach((p, pi) => {
+    for (let j = 0; j < p.s.length; j++, i++) {
+      const [x, y] = projection([p.lon[j] / 1e4, p.lat[j] / 1e4]);
+      X[i] = x; Y[i] = y;
+      for (const c of cols) A[c][i] = p[c][j];
+      GP[i] = p.gp[j] >= 0 ? p.parties[p.gp[j]] : null;
+      REF[i] = j; PART[i] = pi;
+    }
+  });
+  // grade espacial para hover
+  const CELL = 2;
+  const grid = new Map();
+  for (let k = 0; k < N; k++) {
+    const key = Math.floor(X[k] / CELL) + ',' + Math.floor(Y[k] / CELL);
+    let arr = grid.get(key); if (!arr) grid.set(key, arr = []); arr.push(k);
+  }
+  const elemOf = k => ({
+    t26: [A.apt[k], A.comp[k], A.val[k], A.bra[k], A.nul[k]], t22: null,
+    p26: [A.pt[k], A.pl[k]], p22: null, g: GP[k] ? [GP[k], A.gm[k] / 1000] : null,
+  });
+  sections = {
+    N, X, Y, parts, PART, REF,
+    elem: elemOf,
+    values(m) { const out = []; for (let k = 0; k < N; k++) { const v = m.get(elemOf(k)); if (v != null && isFinite(v)) out.push(v); } return out; },
+    govParties() { return [...new Set(GP.filter(Boolean))]; },
+    info(k) {
+      const p = parts[PART[k]], j = REF[k];
+      const mun = p.muns[p.m[j]];
+      return { uf: p.uf, mun, z: p.z[j], s: p.s[j], loc: p.locs[p.l[j]], munName: S.el[mun] ? S.el[mun].n : mun };
+    },
+    colors: null,
+    recolor() {
+      const cs = new Array(N);
+      for (let k = 0; k < N; k++) cs[k] = colorOf(elemOf(k));
+      // agrupa índices por cor para desenhar em lote
+      const by = new Map();
+      for (let k = 0; k < N; k++) { let a = by.get(cs[k]); if (!a) by.set(cs[k], a = []); a.push(k); }
+      this.colors = by;
+    },
+    draw(c, t, px, view) {
+      if (!this.colors) this.recolor();
+      // raio em pixels de tela cresce suavemente com o zoom
+      const rPx = Math.min(7, 0.9 + Math.log2(Math.max(1, t.k)) * 0.75);
+      const r = rPx * px;
+      const [vx0, vy0, vx1, vy1] = view;
+      for (const [col, idx] of this.colors) {
+        c.fillStyle = col;
+        c.beginPath();
+        for (const k of idx) {
+          const x = X[k], y = Y[k];
+          if (x < vx0 || x > vx1 || y < vy0 || y > vy1) continue;
+          c.rect(x - r, y - r, 2 * r, 2 * r);
+        }
+        c.fill();
+      }
+      for (const [k, col] of [[state.hover, 'rgba(255,255,255,.8)'], [state.selected, '#fff']]) {
+        if (typeof k !== 'number') continue;
+        c.strokeStyle = col; c.lineWidth = 2 * px;
+        c.strokeRect(X[k] - r - px, Y[k] - r - px, 2 * r + 2 * px, 2 * r + 2 * px);
+      }
+    },
+    nearest(mx, my, maxDist) {
+      let best = -1, bd = maxDist * maxDist;
+      const r = Math.ceil(maxDist / CELL);
+      const cx = Math.floor(mx / CELL), cy = Math.floor(my / CELL);
+      for (let gx = cx - r; gx <= cx + r; gx++) for (let gy = cy - r; gy <= cy + r; gy++) {
+        const arr = grid.get(gx + ',' + gy); if (!arr) continue;
+        for (const k of arr) { const d = (X[k] - mx) ** 2 + (Y[k] - my) ** 2; if (d < bd) { bd = d; best = k; } }
+      }
+      return best;
+    },
+  };
+  return sections;
+}
+
+// ------------------------------------------------------------------ hit test
+function pick(mx, my) {
+  const t = state.transform;
+  const x = (mx - t.x) / t.k, y = (my - t.y) / t.k;
+  if (state.level === 'secao') {
+    if (!sections) return null;
+    // raio de captura de ~8 px de tela
+    const k = sections.nearest(x, y, 8 / t.k);
+    return k >= 0 ? k : null;
+  }
+  const feats = geo[state.level];
+  let best = null;
+  for (const g of feats) {
+    const b = g.bbox;
+    if (x < b[0] || x > b[2] || y < b[1] || y > b[3]) continue;
+    if (hitCtx.isPointInPath(g.path, x, y) && (!best || g.area < best.area)) best = g;
+  }
+  return best ? best.id : null;
+}
+
+// ------------------------------------------------------------------ tooltip
+const tip = $('#tooltip');
+function hideTooltip() { tip.hidden = true; }
+function metricText(e) {
+  const m = METRIC[state.metric];
+  if (!e) return 'Sem dados';
+  if (m.kind === 'gov') {
+    if (!e.g) return 'Sem dados';
+    return `<b style="color:${partyColor(e.g[0])}">${esc(e.g[0])}</b> · margem ${fmtPct(e.g[1], 1)}`;
+  }
+  const v = m.get(e);
+  if (v == null || !isFinite(v)) return m.diff && state.level === 'secao' ? 'Sem comparação com 2022 por seção' : 'Sem dados';
+  switch (m.kind) {
+    case 'abs': return `<b>${fmtInt.format(v)}</b>`;
+    case 'pct': return `<b>${fmtPct(v)}</b>`;
+    case 'rel': return `<b>${fmtPP(v, 2)}%</b>`;
+    case 'pp': return `<b>${fmtPP(v, 2)} p.p.</b>`;
+    case 'pres': return `PT <b>${fmtPct(v, 1)}</b> · PL <b>${fmtPct(1 - v, 1)}</b>`;
+    case 'dpres': return `<b>${fmtPP(v, 2)} p.p.</b> ${v >= 0 ? 'para o PT' : 'para o PL'}`;
+  }
+  return '';
+}
+function showTooltip(mx, my, id) {
+  let name, sub, e;
+  if (state.level === 'secao' && typeof id === 'number') {
+    const inf = sections.info(id);
+    name = `Seção ${inf.s} · Zona ${inf.z}`;
+    sub = `${titleCase(inf.loc || '')} — ${titleCase(inf.munName)} (${inf.uf.toUpperCase()})`;
+    e = sections.elem(id);
+  } else {
+    e = S.el[id];
+    name = id === 'br' ? 'Brasil' : id === 'zz' ? 'Exterior' : titleCase(e ? e.n : id);
+    sub = e && e.uf && e.uf !== id && id !== 'br' ? e.uf.toUpperCase() : '';
+  }
+  tip.innerHTML = `<div class="tt-name">${esc(name)}</div>${sub ? `<div class="tt-sub">${esc(sub)}</div>` : ''}
+    <div class="tt-val">${metricText(e)}</div>`;
+  tip.hidden = false;
+  const r = tip.getBoundingClientRect();
+  let x = mx + 14, y = my + 14;
+  if (x + r.width > W - 8) x = mx - r.width - 14;
+  if (y + r.height > H - 8) y = my - r.height - 14;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+
+// ------------------------------------------------------------------ UI
+function buildMapmodes() {
+  const grid = $('#mm-grid');
+  let html = '', group = '';
+  for (const m of METRICS) {
+    if (m.group !== group) { group = m.group; html += `<div class="mm-group-label">${group}</div>`; }
+    html += `<button class="mm-btn" data-metric="${m.id}" title="${esc(m.name)}" aria-label="${esc(m.name)}">
+      <svg viewBox="0 0 24 24">${ICONS[m.icon]}</svg>${m.diff ? '<span class="delta">Δ</span>' : ''}</button>`;
+  }
+  grid.innerHTML = html;
+  grid.addEventListener('click', ev => {
+    const b = ev.target.closest('.mm-btn'); if (!b || b.disabled) return;
+    setMetric(b.dataset.metric);
+  });
+  syncMapmodes();
+}
+function syncMapmodes() {
+  document.querySelectorAll('.mm-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.metric === state.metric);
+    b.disabled = state.level === 'secao' && METRIC[b.dataset.metric].diff;
+    if (b.disabled) b.title = METRIC[b.dataset.metric].name + ' (indisponível por seção)';
+    else b.title = METRIC[b.dataset.metric].name;
+  });
+}
+function setMetric(id) {
+  state.metric = id;
+  if (sections) sections.colors = null;
+  syncMapmodes(); updateScale(); draw();
+}
+async function setLevel(lv) {
+  if (lv === state.level) return;
+  state.level = lv;
+  document.querySelectorAll('.levels button').forEach(b => b.classList.toggle('active', b.dataset.level === lv));
+  state.hover = null;
+  closePanel();
+  if (lv === 'secao') {
+    if (METRIC[state.metric].diff) state.metric = 'pres';
+    await loadSections();
+    sections.colors = null;
+  }
+  $('#exterior').hidden = lv === 'pais';
+  syncMapmodes(); updateScale(); draw();
+}
+
+function updateExteriorButton() {
+  const btn = $('#exterior');
+  if (btn.hidden) return;
+  btn.querySelector('svg').style.background = colorOf(S.el.zz);
+  btn.classList.toggle('selected', state.selected === 'zz');
+}
+
+function setupUI() {
+  document.querySelectorAll('.levels button').forEach(b => b.addEventListener('click', () => setLevel(b.dataset.level)));
+  const ext = $('#exterior');
+  ext.addEventListener('click', () => openPanel('zz'));
+  ext.addEventListener('mousemove', ev => showTooltip(ev.clientX, ev.clientY, 'zz'));
+  ext.addEventListener('mouseleave', hideTooltip);
+  $('#panel-close').addEventListener('click', closePanel);
+  window.addEventListener('resize', resize);
+  window.addEventListener('keydown', ev => { if (ev.key === 'Escape') closePanel(); });
+
+  let down = null;
+  canvas.addEventListener('mousedown', ev => { down = [ev.clientX, ev.clientY]; });
+  canvas.addEventListener('mousemove', ev => {
+    const id = pick(ev.clientX, ev.clientY);
+    if (id !== state.hover) { state.hover = id; scheduleDraw(); }
+    canvas.classList.toggle('hovering', id != null);
+    if (id != null) showTooltip(ev.clientX, ev.clientY, id); else hideTooltip();
+  });
+  canvas.addEventListener('mouseleave', () => { state.hover = null; hideTooltip(); scheduleDraw(); });
+  canvas.addEventListener('click', ev => {
+    if (down && Math.hypot(ev.clientX - down[0], ev.clientY - down[1]) > 4) return;
+    const id = pick(ev.clientX, ev.clientY);
+    if (id != null) openPanel(id);
+  });
+}
+
+// ------------------------------------------------------------------ painel
+const panelState = { tab: 1, parties: null, statuses: new Set(STATUS_ORDER), shown: 60, ctx: null };
+
+async function loadCand(scope) {
+  if (!cand[scope]) cand[scope] = await fetchJSON(`data/cand/${scope}.json`);
+  return cand[scope];
+}
+async function loadDetail(id) {
+  if (!detailCache.has(id)) detailCache.set(id, fetchJSON(`data/d/${id}.json`));
+  return detailCache.get(id);
+}
+const secDetailCache = new Map();
+async function loadSecDetail(mun) {
+  if (!secDetailCache.has(mun)) secDetailCache.set(mun, fetchJSON(`data/sd/${mun}.json`));
+  return secDetailCache.get(mun);
+}
+
+function closePanel() {
+  state.selected = null;
+  $('#panel').hidden = true;
+  document.body.classList.remove('panel-open');
+  draw();
+}
+
+async function openPanel(id) {
+  state.selected = id;
+  $('#panel').hidden = false;
+  document.body.classList.add('panel-open');
+  draw();
+  const body = $('#panel-body');
+  body.innerHTML = '<div class="empty">Carregando…</div>';
+  let pc;   // contexto do painel
+  try {
+    if (state.level === 'secao' && typeof id === 'number') {
+      const inf = sections.info(id);
+      const [sd] = await Promise.all([loadSecDetail(inf.mun), loadCand('br'), loadCand(inf.uf)]);
+      const d = sd[`${inf.z}-${inf.s}`];
+      $('#panel-sub').textContent = `${titleCase(inf.munName)} (${inf.uf.toUpperCase()}) · Zona ${inf.z}`;
+      $('#panel-title').textContent = `Seção ${inf.s}`;
+      // converter número -> sq
+      const byNum = (scope, cg) => {
+        const m = {}; for (const [sq, c] of Object.entries(cand[scope])) if (c[4] === cg) m[c[1]] = sq; return m;
+      };
+      const c = {};
+      for (const [cg, v] of Object.entries((d && d.c) || {})) {
+        const map = byNum(cg === '1' ? 'br' : inf.uf, +cg);
+        c[cg] = { t: v.t, v: Object.entries(v.v).filter(([n]) => map[n]).map(([n, vv]) => [map[n], vv]).sort((a, b) => b[1] - a[1]) };
+      }
+      pc = { id, kind: 'secao', uf: inf.uf, detail: { c }, loc: d ? d.loc : '', tabs: [1, 3, 5] };
+    } else {
+      const e = S.el[id];
+      const detail = await loadDetail(id);
+      const uf = id === 'br' ? null : e.uf;
+      await Promise.all([loadCand('br'), uf && uf !== 'zz' ? loadCand(uf) : null,
+        id === 'br' ? Promise.all(Object.keys(S.uf).filter(u => u !== 'zz').map(loadCand)) : null]);
+      const kind = id === 'br' ? 'pais' : id === 'zz' ? 'exterior' : id.length === 2 ? 'estado' : 'municipio';
+      $('#panel-sub').textContent = kind === 'pais' ? 'País' : kind === 'exterior' ? 'Votos no exterior'
+        : kind === 'estado' ? 'Estado' : `Município · ${uf.toUpperCase()}`;
+      $('#panel-title').textContent = kind === 'pais' ? 'Brasil' : kind === 'exterior' ? 'Exterior'
+        : kind === 'estado' ? S.uf[id] : titleCase(e.n);
+      const tabs = kind === 'pais' ? [1, 3, 5, 6] : kind === 'exterior' ? [1] : [1, 3, 5, 6, 7];
+      pc = { id, kind, uf, detail, tabs };
+    }
+  } catch (err) {
+    body.innerHTML = `<div class="empty">Não foi possível carregar os dados (${esc(err.message)}).</div>`;
+    return;
+  }
+  if (state.selected !== id) return;
+  panelState.ctx = pc;
+  if (!pc.tabs.includes(panelState.tab)) panelState.tab = 1;
+  panelState.parties = null;
+  panelState.shown = 60;
+  renderPanel();
+}
+
+function cargoKey(pc, tab) {
+  // Distrito Federal: deputado distrital (cargo 8) no lugar de estadual
+  if (tab === 7 && pc.detail.c['8']) return '8';
+  return String(tab);
+}
+function candInfo(pc, sq, cargo, ufHint) {
+  const scope = cargo === 1 ? 'br' : (ufHint || pc.uf);
+  return (cand[scope] || {})[sq];
+}
+
+function renderPanel() {
+  const pc = panelState.ctx;
+  const body = $('#panel-body');
+  const key = cargoKey(pc, panelState.tab);
+  const cg = pc.detail.c[key] || {};
+  const tot = cg.t || (pc.detail.c['1'] || {}).t;
+  const totCargo = cg.t ? (CARGOS.find(c => c.id === panelState.tab) || {}).nome : 'Presidente';
+  let html = '';
+  if (pc.kind === 'secao' && pc.loc) html += `<div class="count" style="margin-top:-4px">${esc(titleCase(pc.loc))}</div>`;
+  if (tot) html += votacaoCard(tot, totCargo) + eleitoradoCard(tot);
+  html += `<div class="tabs">${CARGOS.map(c => {
+    const ok = pc.tabs.includes(c.id);
+    const label = c.id === 7 && pc.detail.c['8'] ? 'Dep. Distrital' : c.nome;
+    return `<button data-tab="${c.id}" class="${c.id === panelState.tab ? 'active' : ''}" ${ok ? '' : 'disabled'}>${label}</button>`;
+  }).join('')}</div>`;
+
+  // lista de candidatos
+  const list = (cg.v || []).map(r => {
+    const sq = r[0], votes = r[1];
+    const ufHint = cg.list ? r[3] : null;
+    const info = candInfo(pc, sq, panelState.tab === 7 && key === '8' ? 8 : panelState.tab, ufHint);
+    const pct = cg.list ? r[2] / 100 : (cg.t && cg.t[2] ? votes / cg.t[2] : 0);
+    return { sq, votes, pct, info, uf: ufHint || (panelState.tab === 1 ? 'br' : pc.uf) };
+  }).filter(c => c.info);
+  list.sort((a, b) => b.pct - a.pct || b.votes - a.votes);
+
+  const partyVotes = new Map();
+  for (const c of list) partyVotes.set(c.info[2], (partyVotes.get(c.info[2]) || 0) + c.votes);
+  const parties = [...partyVotes.entries()].sort((a, b) => b[1] - a[1]).map(([p]) => p);
+  if (!panelState.parties) panelState.parties = new Set(parties);
+  const presentStatus = STATUS_ORDER.filter(s => list.some(c => c.info[3] === s));
+
+  html += `<div class="filters">
+    <div class="fl"><span>Partido</span><span><button data-act="pall">todos</button> · <button data-act="pnone">nenhum</button></span></div>
+    <div class="chips ${parties.length > 12 ? 'collapsed' : ''}" id="party-chips">${parties.map(p =>
+      `<button class="chip ${panelState.parties.has(p) ? 'on' : ''}" data-party="${esc(p)}"><i style="background:${partyColor(p)}"></i>${esc(p)}</button>`).join('')}</div>
+    ${parties.length > 12 ? '<button class="more-chips" data-act="pmore">mostrar todos os partidos</button>' : ''}
+    <div class="fl"><span>Situação</span></div>
+    <div class="chips">${presentStatus.map(s =>
+      `<button class="chip ${panelState.statuses.has(s) ? 'on' : ''}" data-status="${s}"><i style="background:var(--st-${s})"></i>${STATUS[s]}</button>`).join('')}</div>
+  </div>`;
+
+  const filtered = list.filter(c => panelState.parties.has(c.info[2]) && panelState.statuses.has(c.info[3]));
+  const titleExtra = pc.kind === 'pais' && panelState.tab !== 1 ? ' eleitos ou no 2º turno, por UF' : '';
+  html += `<div class="count">${fmtInt.format(filtered.length)} de ${fmtInt.format(list.length)} candidatos${titleExtra}</div>`;
+  if (!filtered.length) html += '<div class="empty">Nenhum candidato com os filtros atuais.</div>';
+  html += filtered.slice(0, panelState.shown).map(c => candCard(c, pc)).join('');
+  if (filtered.length > panelState.shown) html += `<button class="show-more" data-act="more">Mostrar mais (${fmtInt.format(filtered.length - panelState.shown)} restantes)</button>`;
+
+  const scroll = body.scrollTop;
+  body.innerHTML = html;
+  body.scrollTop = scroll;
+}
+
+function votacaoCard(t, cargoNome) {
+  const [, comp, val, bra, nul] = t;
+  const total = comp || (val + bra + nul);
+  const p = x => total ? x / total : 0;
+  return `<div class="card"><h2>Votação${cargoNome ? ` · ${esc(cargoNome)}` : ''}</h2>
+    <div class="stack"><i style="width:${p(val) * 100}%;background:var(--valid)"></i><i style="width:${p(bra) * 100}%;background:var(--blank)"></i><i style="width:${p(nul) * 100}%;background:var(--null)"></i></div>
+    <div class="big-num"><b>${fmtInt.format(total)}</b> Votos</div>
+    <div class="row"><span>Nominais e de legenda</span><span class="pct">${fmtPct(p(val))}</span></div>
+    <div class="row sub"><span class="lbl"><span class="sq" style="background:var(--valid)"></span>Válidos</span><span>${fmtInt.format(val)}</span></div>
+    <div class="row"><span class="lbl"><span class="sq" style="background:var(--blank)"></span><span class="two">${fmtInt.format(bra)}<small>Em branco</small></span></span><span class="pct">${fmtPct(p(bra))}</span></div>
+    <div class="row"><span class="lbl"><span class="sq" style="background:var(--null)"></span><span class="two">${fmtInt.format(nul)}<small>Nulos</small></span></span><span class="pct">${fmtPct(p(nul))}</span></div>
+  </div>`;
+}
+function eleitoradoCard(t) {
+  const [apt, comp] = t;
+  const ab = Math.max(0, apt - comp);
+  const pc = apt ? comp / apt : 0;
+  return `<div class="card">
+    <div class="row"><span>Eleitorado apto</span><b>${fmtInt.format(apt)}</b></div>
+    <div class="abst"><div class="labels"><span>Comparecimento<b>${fmtInt.format(comp)}</b></span><span style="text-align:right">Abstenção<b>${fmtInt.format(ab)}</b></span></div>
+    <div class="bar"><span class="c" style="width:${pc * 100}%">${pc > 0.15 ? fmtPct(pc) : ''}</span><span class="a" style="width:${(1 - pc) * 100}%">${1 - pc > 0.12 ? fmtPct(1 - pc) : ''}</span></div></div>
+  </div>`;
+}
+function photoUrl(sq, cargo, uf) {
+  const ele = cargo === 1 ? 6257 : 6259;
+  const scope = cargo === 1 ? 'br' : uf;
+  return `https://resultados.tse.jus.br/oficial/ele2026/${ele}/fotos/${scope}/${sq}.jpeg`;
+}
+function candCard(c, pc) {
+  const [nome, num, partido, st, cargo] = c.info;
+  const col = { E: '#3fb950', 2: '#e3b341', N: '#6e7681', S: '#58a6ff', A: '#f85149' }[st];
+  const R = 25, C = 2 * Math.PI * R;
+  const ini = nome.split(/\s+/).slice(0, 2).map(w => w[0]).join('');
+  return `<div class="cand">
+    <div class="ring"><svg viewBox="0 0 56 56"><circle cx="28" cy="28" r="${R}" fill="none" stroke="var(--surface-3)" stroke-width="3"/>
+      <circle cx="28" cy="28" r="${R}" fill="none" stroke="${col}" stroke-width="3" stroke-dasharray="${C * Math.min(1, c.pct)} ${C}" stroke-linecap="round"/></svg>
+      <img loading="lazy" src="${photoUrl(c.sq, cargo, c.uf)}" alt="" onerror="this.outerHTML='<span class=&quot;ini&quot;>${esc(ini)}</span>'"></div>
+    <div class="info">
+      <div class="party">${esc(partido)} – ${esc(num)}${pc.kind === 'pais' && panelState.tab !== 1 ? `<span class="uf-tag">${c.uf.toUpperCase()}</span>` : ''}</div>
+      <div class="name" title="${esc(c.info[5] || nome)}">${esc(nome)}</div>
+      <span class="pill ${st}">${STATUS[st]}</span>
+    </div>
+    <div class="nums"><div class="p">${fmtPct(c.pct)}</div><div class="v">${fmtInt.format(c.votes)} votos</div></div>
+  </div>`;
+}
+
+$('#panel-body').addEventListener('click', ev => {
+  const b = ev.target.closest('button'); if (!b) return;
+  if (b.dataset.tab) { panelState.tab = +b.dataset.tab; panelState.parties = null; panelState.shown = 60; renderPanel(); $('#panel-body').scrollTop = 0; return; }
+  if (b.dataset.party) { const s = panelState.parties; s.has(b.dataset.party) ? s.delete(b.dataset.party) : s.add(b.dataset.party); panelState.shown = 60; renderPanel(); return; }
+  if (b.dataset.status) { const s = panelState.statuses; s.has(b.dataset.status) ? s.delete(b.dataset.status) : s.add(b.dataset.status); panelState.shown = 60; renderPanel(); return; }
+  const act = b.dataset.act;
+  if (act === 'more') { panelState.shown += 100; renderPanel(); }
+  if (act === 'pall') { panelState.parties = null; renderPanel(); }
+  if (act === 'pnone') { panelState.parties = new Set(); renderPanel(); }
+  if (act === 'pmore') { $('#party-chips').classList.remove('collapsed'); b.remove(); }
+});
+
+init().catch(err => {
+  $('#loading-text').textContent = 'Erro ao carregar: ' + err.message;
+  console.error(err);
+});
+})();
