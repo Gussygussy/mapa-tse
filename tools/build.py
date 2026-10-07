@@ -580,17 +580,37 @@ def build_locais():
         total += len(names)
     print('locais de votação (pontos)', total)
 
-    # exterior: sem coordenadas no TSE; um elemento por cidade (o app desenha bolhas dentro do globo)
+    # exterior: o TSE não publica coordenadas; tools/geocode_exterior.py geocodifica os
+    # endereços (Nominatim/OSM) em tools/exterior_coords.json. Locais com a mesma coordenada
+    # viram um ponto; sem coordenada, o local fica sem ponto (entra só no total do exterior).
     zz_names = {m['cd']: m['nm'] for a in cm['abr'] if a['cd'] == 'zz' for m in a['mu']}
-    cities = defaultdict(list)
+    cpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'exterior_coords.json')
+    coords = json.load(open(cpath)) if os.path.exists(cpath) else {}
+    zz_loc = {}
+    for r in rows('eleitorado_local_votacao_2026.zip', 'eleitorado_local_votacao_2026_ZZ.csv'):
+        if r['NR_TURNO'] == '1':
+            zz_loc[(r['CD_MUNICIPIO'].zfill(5), int(r['NR_ZONA']), int(r['NR_SECAO']))] = (
+                r['NR_LOCAL_VOTACAO'], r['NM_LOCAL_VOTACAO'])
+    pts = defaultdict(lambda: {'secs': [], 'names': set(), 'cities': set(), 'src': set()})
+    sem = 0
     for k in SEC_T:
-        if k[0] == 'zz':
-            cities[k[1]].append(k)
+        if k[0] != 'zz':
+            continue
+        nr, name = zz_loc.get((k[1], k[2], k[3]), (None, ''))
+        c = coords.get(f'{k[1]}-{nr}')
+        if not c:
+            sem += 1
+            continue
+        g = pts[(round(c[0], 5), round(c[1], 5))]
+        g['secs'].append(k)
+        g['names'].add(name)
+        g['cities'].add(k[1])
+        g['src'].add(c[2])
     out = []
-    for code, secs in cities.items():
+    for (lat, lon), g in pts.items():
         t = [0] * 5
         v = defaultdict(int)
-        for k in secs:
+        for k in g['secs']:
             tt = SEC_T[k].get(1)
             if tt:
                 for i in range(5):
@@ -598,11 +618,17 @@ def build_locais():
             for num, vv in SEC_V.get(k, {}).get(1, {}).items():
                 if num not in ('95', '96', '97') and vv:
                     v[num] += vv
-        if t[0]:
-            out.append({'cd': code, 'n': zz_names.get(code, code), 'ns': len(secs), 't': t, 'v': dict(v)})
+        if not t[0]:
+            continue
+        names = sorted(g['names'])
+        city = ', '.join(sorted(zz_names.get(c_, c_) for c_ in g['cities']))
+        out.append({'lat': lat, 'lon': lon, 'n': names[0] if len(names) == 1 else f'{len(names)} locais',
+                    'city': city, 'ns': len(g['secs']), 't': t, 'v': dict(v),
+                    'aprox': 'cidade' in g['src'],
+                    's': sorted([k[2], k[3]] for k in g['secs'])})
     out.sort(key=lambda r: -r['t'][0])
     dump('s/zz.json', out)
-    print('cidades no exterior', len(out))
+    print('pontos no exterior', len(out), '| seções sem coordenada', sem)
 
 
 build_locais()

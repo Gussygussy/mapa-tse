@@ -100,7 +100,8 @@ let geo = {};          // features
 const cand = {};       // escopo -> dicionário de candidatos
 const detailCache = new Map();
 let locais = null;     // pontos do nível Seção (um por local de votação)
-let extCities = null;  // nível Seção: cidades do exterior como bolhas dentro do globo (id 'x<código>')
+let extCities = null;  // nível Seção: locais do exterior como pontos num globo dentro do círculo (id 'x<n>')
+let extGlobe = null;   // { land, borders } em Path2D, na projeção do globo
 
 // ------------------------------------------------------------------ canvas
 const canvas = $('#map');
@@ -260,8 +261,8 @@ function drawOverlay() {
       continue;
     }
     if (typeof id === 'string' && id[0] === 'x' && extCities) {
-      const b = extCities.get(id);
-      octx.beginPath(); octx.arc(b.x, b.y, b.r, 0, 2 * Math.PI); octx.stroke();
+      const b = extCities.get(id), r = locais.radius(t.k) * px * 0.9;
+      octx.beginPath(); octx.arc(b.x, b.y, r + 1.5 * px, 0, 2 * Math.PI); octx.stroke();
       continue;
     }
     const g = (geo[state.level] || [geo.exterior]).find(f => f.id === id);
@@ -511,8 +512,9 @@ async function loadLocais() {
     }))),
     fetchJSON('data/s/zz.json'),
   ]);
+  const world = await fetchJSON('data/geo/world.json');
   $('#loading').hidden = true;
-  buildExtCities(zzCities);
+  buildExtCities(zzCities, world);
   const N = parts.reduce((a, p) => a + p.ns.length, 0);
   const X = new Float32Array(N), Y = new Float32Array(N);
   const cols = ['apt', 'comp', 'val', 'bra', 'nul', 'pt', 'pl', 'gm'];
@@ -582,41 +584,38 @@ async function loadLocais() {
   return locais;
 }
 
-// O TSE não tem coordenadas dos locais no exterior: cada cidade vira uma bolha (área ∝ eleitorado)
-// empacotada dentro do círculo do exterior.
-function buildExtCities(list) {
+// Exterior no nível Seção: um globo (azimutal equidistante centrado no Brasil, o mundo inteiro
+// cabe no círculo) com um ponto por local de votação. O TSE não publica as coordenadas desses
+// locais; elas foram geocodificadas a partir dos endereços (tools/geocode_exterior.py).
+function buildExtCities(list, world) {
   const ex = geo.exterior.ex;
-  const nodes = list.map(c => ({ c, r: Math.max(Math.sqrt(c.t[0]), 14) }));
-  d3.packSiblings(nodes);
-  const enc = d3.packEnclose(nodes), f = ex.r * 0.93 / enc.r;
+  const proj = d3.geoAzimuthalEquidistant().rotate([50, 15]).clipAngle(179.5)
+    .scale(ex.r * 0.97 / Math.PI).translate([ex.cx, ex.cy]);
+  const obj = world.objects.countries;
+  const land = new Path2D(); d3.geoPath(proj, land)(topojson.feature(world, obj));
+  const borders = new Path2D(); d3.geoPath(proj, borders)(topojson.mesh(world, obj, (a, b) => a !== b));
+  extGlobe = { land, borders };
   extCities = new Map();
-  for (const n of nodes) {
-    const v = n.c.v;
-    extCities.set('x' + n.c.cd, {
-      x: ex.cx + (n.x - enc.x) * f, y: ex.cy + (n.y - enc.y) * f, r: n.r * f, c: n.c,
-      e: { t26: n.c.t, t22: null, p26: [v['13'] || 0, v['22'] || 0], p22: null, g: null },
-    });
-  }
+  list.forEach((p, i) => {
+    const [x, y] = proj([p.lon, p.lat]);
+    const v = p.v;
+    extCities.set('x' + i, { x, y, c: p, e: { t26: p.t, t22: null, p26: [v['13'] || 0, v['22'] || 0], p22: null, g: null } });
+  });
 }
 function drawExtCities(c, t, px) {
   const ex = geo.exterior;
-  c.fillStyle = '#1b2029'; c.fill(ex.path);
+  c.save();
+  c.clip(ex.path);
+  c.fillStyle = '#10141a'; c.fill(ex.path);
+  c.fillStyle = '#232a35'; c.fill(extGlobe.land);
+  c.strokeStyle = 'rgba(255,255,255,.12)'; c.lineWidth = 0.5 * px; c.stroke(extGlobe.borders);
+  const r = locais.radius(t.k) * px * 0.9;
   for (const b of extCities.values()) {
-    c.beginPath(); c.arc(b.x, b.y, b.r, 0, 2 * Math.PI);
+    c.beginPath(); c.arc(b.x, b.y, r, 0, 2 * Math.PI);
     c.fillStyle = colorOf(b.e); c.fill();
-    c.strokeStyle = 'rgba(14,17,22,.7)'; c.lineWidth = 0.6 * px; c.stroke();
+    c.strokeStyle = 'rgba(14,17,22,.6)'; c.lineWidth = 0.5 * px; c.stroke();
   }
-  // nomes das cidades quando a bolha fica grande na tela
-  c.textAlign = 'center'; c.textBaseline = 'middle';
-  for (const b of extCities.values()) {
-    const rPx = b.r * t.k;
-    if (rPx < 22) continue;
-    const name = titleCase(b.c.n), fs = Math.min(13, rPx / 3.2);
-    c.font = `500 ${fs * px}px Roboto, system-ui, sans-serif`;
-    // texto escuro em bolhas claras e claro em bolhas escuras
-    c.fillStyle = d3.lab(colorOf(b.e)).l > 60 ? 'rgba(14,17,22,.88)' : 'rgba(255,255,255,.92)';
-    c.fillText(name, b.x, b.y, 1.8 * b.r);
-  }
+  c.restore();
 }
 
 // ------------------------------------------------------------------ hit test
@@ -627,7 +626,9 @@ function pick(mx, my) {
     const e = geo.exterior.ex;
     if ((x - e.cx) ** 2 + (y - e.cy) ** 2 <= e.r ** 2) {
       if (state.level === 'secao' && extCities) {
-        for (const [id, b] of extCities) if ((x - b.x) ** 2 + (y - b.y) ** 2 <= b.r ** 2) return id;
+        let best = null, bd = (8 / t.k) ** 2;
+        for (const [id, b] of extCities) { const d = (x - b.x) ** 2 + (y - b.y) ** 2; if (d < bd) { bd = d; best = id; } }
+        if (best) return best;
       }
       return 'zz';
     }
@@ -684,7 +685,7 @@ function showTooltip(mx, my, id) {
     const b = extCities.get(id);
     e = b.e;
     name = titleCase(b.c.n);
-    sub = `Exterior · ${b.c.ns} ${b.c.ns > 1 ? 'seções' : 'seção'}`;
+    sub = `${titleCase(b.c.city)} · ${b.c.ns} ${b.c.ns > 1 ? 'seções' : 'seção'}${b.c.aprox ? ' · posição aproximada' : ''}`;
   } else if (typeof id === 'number') {
     const inf = locais.info(id);
     e = locais.elem(id);
@@ -818,11 +819,14 @@ async function openPanel(id) {
     await loadCand('br');
     const map = {};
     for (const [sq, c] of Object.entries(cand.br)) map[c[1]] = sq;
-    $('#panel-sub').textContent = 'Exterior · cidade';
+    $('#panel-sub').textContent = `Exterior · ${titleCase(b.c.city)}`;
     $('#panel-title').textContent = titleCase(b.c.n);
     const v = Object.entries(b.c.v).filter(([n]) => map[n]).map(([n, vv]) => [map[n], vv]).sort((a, c) => c[1] - a[1]);
+    const byZone = {};
+    for (const [z, sec] of b.c.s) (byZone[z] = byZone[z] || []).push(sec);
+    const secTxt = Object.entries(byZone).map(([z, ss]) => `Zona ${z}: ${ss.length > 1 ? 'seções' : 'seção'} ${ss.join(', ')}`).join(' · ');
     pc = { id, kind: 'local', uf: 'zz', detail: { c: { 1: { t: b.c.t, v } } }, tabs: [1],
-      muns: `${b.c.ns} ${b.c.ns > 1 ? 'seções' : 'seção'}` };
+      muns: secTxt + (b.c.aprox ? ' · posição aproximada (centro da cidade)' : '') };
    } else if (typeof id === 'number') {
     const inf = locais.info(id);
     const [sd] = await Promise.all([loadLocalDetail(inf.mun), loadCand('br'), loadCand(inf.uf)]);
@@ -999,7 +1003,7 @@ window.__mapa = {
     d3.select(canvas).call(zoom.transform, d3.zoomIdentity.translate(W / 2 - x * k, H / 2 - y * k).scale(k));
   },
   extCityScreen(i) {
-    const b = [...extCities.values()][i], t = state.transform;
+    const b = [...extCities.values()][i], t = state.transform;  // ponto i do exterior
     return [b.x * t.k + t.x, b.y * t.k + t.y];
   },
   localScreen(lon, lat) {
