@@ -645,7 +645,7 @@ def build_locais():
         city = ', '.join(sorted(zz_names.get(c_, c_) for c_ in g['cities']))
         out.append({'lat': lat, 'lon': lon, 'n': names[0] if len(names) == 1 else f'{len(names)} locais',
                     'city': city, 'ns': len(g['secs']), 't': t, 'v': dict(v),
-                    'aprox': 'cidade' in g['src'],
+                    'aprox': any(x.startswith('cidade') for x in g['src']),
                     's': sorted([k[2], k[3]] for k in g['secs'])})
     out.sort(key=lambda r: -r['t'][0])
     dump('s/zz.json', out)
