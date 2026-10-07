@@ -903,7 +903,9 @@ function renderPanel() {
     const sq = r[0], votes = r[1];
     const ufHint = cg.list ? r[3] : null;
     const info = candInfo(pc, sq, panelState.tab === 7 && key === '8' ? 8 : panelState.tab, ufHint);
-    const pct = cg.list ? r[2] / 100 : (cg.t && cg.t[2] ? votes / cg.t[2] : 0);
+    // mesma base do TSE: válidos + anulados sub judice (t[5])
+    const base = cg.t ? cg.t[2] + (cg.t[5] || 0) : 0;
+    const pct = cg.list ? r[2] / 100 : (base ? votes / base : 0);
     return { sq, votes, pct, info, uf: ufHint || (panelState.tab === 1 ? 'br' : pc.uf) };
   }).filter(c => c.info);
   // na visão país, deputados federais (de UFs diferentes) são ordenados por votos; o resto, por %
@@ -939,14 +941,15 @@ function renderPanel() {
 }
 
 function votacaoCard(t, cargoNome) {
-  const [, comp, val, bra, nul] = t;
-  const total = comp || (val + bra + nul);
+  const [, comp, val, bra, nul] = t, sj = t[5] || 0;
+  const total = comp || (val + sj + bra + nul);
   const p = x => total ? x / total : 0;
   return `<div class="card"><h2>Votação${cargoNome ? ` · ${esc(cargoNome)}` : ''}</h2>
-    <div class="stack"><i style="width:${p(val) * 100}%;background:var(--valid)"></i><i style="width:${p(bra) * 100}%;background:var(--blank)"></i><i style="width:${p(nul) * 100}%;background:var(--null)"></i></div>
+    <div class="stack"><i style="width:${p(val) * 100}%;background:var(--valid)"></i><i style="width:${p(sj) * 100}%;background:var(--annul-sj)"></i><i style="width:${p(bra) * 100}%;background:var(--blank)"></i><i style="width:${p(nul) * 100}%;background:var(--null)"></i></div>
     <div class="big-num"><b>${fmtInt.format(total)}</b> Votos</div>
-    <div class="row"><span>Nominais e de legenda</span><span class="pct">${fmtPct(p(val))}</span></div>
+    <div class="row"><span>Nominais e de legenda</span><span class="pct">${fmtPct(p(val + sj))}</span></div>
     <div class="row sub"><span class="lbl"><span class="sq" style="background:var(--valid)"></span>Válidos</span><span>${fmtInt.format(val)}</span></div>
+    ${sj ? `<div class="row sub"><span class="lbl"><span class="sq" style="background:var(--annul-sj)"></span>Anulados sub judice</span><span>${fmtInt.format(sj)}</span></div>` : ''}
     <div class="row"><span class="lbl"><span class="sq" style="background:var(--blank)"></span><span class="two">${fmtInt.format(bra)}<small>Em branco</small></span></span><span class="pct">${fmtPct(p(bra))}</span></div>
     <div class="row"><span class="lbl"><span class="sq" style="background:var(--null)"></span><span class="two">${fmtInt.format(nul)}<small>Nulos</small></span></span><span class="pct">${fmtPct(p(nul))}</span></div>
   </div>`;

@@ -116,7 +116,8 @@ def parse_api(d, scope, store_cands=True):
                 out.append([x['sqcand'], n(x['vap'])])
     out.sort(key=lambda r: -r[1])
     e, v = d['e'], d['v']
-    t = [n(e['te']), n(e['c']), n(v['vv']), n(v['vb']), n(v['tvn'])]
+    # [aptos, comparecimento, válidos, brancos, nulos, anulados sub judice]
+    t = [n(e['te']), n(e['c']), n(v['vv']), n(v['vb']), n(v['tvn']), n(v.get('vansj', 0))]
     return cargo, {'t': t, 'v': out, 'nv': n(c.get('nv', 0))}
 
 
@@ -266,6 +267,13 @@ def cand_party(scope):
     return lambda sq: cands[scope][sq][2] if sq in cands.get(scope, {}) else CSV_PARTY.get(sq, '?')
 
 
+def split_sj(t, votes, scope):
+    """Totais vindos do CSV contam os votos anulados sub judice como válidos. Separa-os como
+    no TSE: [aptos, comp, válidos, brancos, nulos, anulados sub judice]. votes: [[sq, votos]]."""
+    sj = sum(v for sq, v in votes if cands.get(scope, {}).get(sq, [None] * 4)[3] == 'A')
+    return [t[0], t[1], t[2] - sj, t[3], t[4], sj]
+
+
 # ----------------------------------------------------------- saída: resumo
 summary = {}
 
@@ -297,7 +305,8 @@ for cg in (3, 5, 6):
         for sq, v in d['v']:
             stt = cands[uf][sq][3]
             if stt in ('E', '2'):
-                lst.append([sq, v, round(100 * v / d['t'][2], 2) if d['t'][2] else 0, uf])
+                base = d['t'][2] + d['t'][5]
+                lst.append([sq, v, round(100 * v / base, 2) if base else 0, uf])
     lst.sort(key=lambda r: -r[2])
     br_detail = json.load(open(os.path.join(OUT, 'd/br.json')))
     br_detail['c'][str(cg)] = {'v': lst, 'list': True}
@@ -314,10 +323,11 @@ for mun, info in MUNS.items():
     c = {}
     pres = MUN_PRES.get(mun, {})
     pv = sorted([[PRES_NUM[num], v] for num, v in pres.items() if num in PRES_NUM], key=lambda r: -r[1])
-    c[1] = {'t': MUN_T[mun][1], 'v': pv}
+    c[1] = {'t': split_sj(MUN_T[mun][1], pv, 'br'), 'v': pv}
     for cg in cargos_uf(uf):
         votes = MUN_V.get(mun, {}).get(cg, {})
-        c[cg] = {'t': MUN_T[mun][cg], 'v': sorted([[sq, v] for sq, v in votes.items() if v > 0], key=lambda r: -r[1]),
+        vs = sorted([[sq, v] for sq, v in votes.items() if v > 0], key=lambda r: -r[1])
+        c[cg] = {'t': split_sj(MUN_T[mun][cg], vs, uf), 'v': vs,
                  'nv': uf_detail[uf][cg]['nv']}
     gov = gov_summary(c[3]['v'], c[3]['t'][2], cand_party(uf))
     put(mun, info['n'], uf, c[1], gov)
@@ -330,10 +340,11 @@ for z_id in sorted(ZONE_T):
     c = {}
     pv = sorted([[PRES_NUM[num], v] for num, v in ZONE_PRES.get(z_id, {}).items() if num in PRES_NUM],
                 key=lambda r: -r[1])
-    c[1] = {'t': ZONE_T[z_id][1], 'v': pv}
+    c[1] = {'t': split_sj(ZONE_T[z_id][1], pv, 'br'), 'v': pv}
     for cg in cargos_uf(uf):
         votes = ZONE_V.get(z_id, {}).get(cg, {})
-        c[cg] = {'t': ZONE_T[z_id][cg], 'v': sorted([[sq, v] for sq, v in votes.items() if v > 0], key=lambda r: -r[1]),
+        vs = sorted([[sq, v] for sq, v in votes.items() if v > 0], key=lambda r: -r[1])
+        c[cg] = {'t': split_sj(ZONE_T[z_id][cg], vs, uf), 'v': vs,
                  'nv': uf_detail[uf][cg]['nv']}
     gov = gov_summary(c[3]['v'], c[3]['t'][2], cand_party(uf))
     put(z_id, f'Zona {int(z_id[3:])}', uf, c[1], gov)
@@ -504,6 +515,11 @@ def build_locais():
     LOC = cached('locais', load_locais)
     CENT = mun_centroids()
     gov_num = {uf: {v[1]: v[2] for v in cands[uf].values() if v[4] == 3} for uf in UFS}
+    sj_nums = defaultdict(set)   # (escopo, cargo) -> números de candidatos com votos anulados sub judice
+    for scope, d in cands.items():
+        for v in d.values():
+            if v[3] == 'A':
+                sj_nums[(scope, v[4])].add(v[1])
 
     groups = defaultdict(lambda: defaultdict(list))   # uf -> chave do local -> [seções]
     meta = {}
@@ -544,6 +560,11 @@ def build_locais():
                     for num, vv in SEC_V.get(k, {}).get(cg, {}).items():
                         if num not in ('95', '96', '97'):
                             votes[cg][num] += vv
+            # separa os anulados sub judice dos válidos (6º campo), como no TSE
+            for cg in (1, 3, 5):
+                sjn = sj_nums.get(('br' if cg == 1 else uf, cg), ())
+                sj = sum(v for num, v in votes[cg].items() if num in sjn)
+                tot[cg] = tot[cg][:2] + [tot[cg][2] - sj] + tot[cg][3:5] + [sj]
             t1 = tot[1] if tot[1][0] else tot[3]
             gs = sorted(((vv, num) for num, vv in votes[3].items() if num in gov_num[uf]), reverse=True)
             if gs and gs[0][0] > 0 and tot[3][2]:
