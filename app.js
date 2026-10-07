@@ -603,7 +603,12 @@ function metricText(e) {
     case 'pct': return `<b>${fmtPct(v)}</b>`;
     case 'rel': return `<b>${fmtPP(v, 2)}%</b>`;
     case 'pp': return `<b>${fmtPP(v, 2)} p.p.</b>`;
-    case 'pres': return `PT <b>${fmtPct(v, 1)}</b> · PL <b>${fmtPct(1 - v, 1)}</b>`;
+    case 'pres': {
+      // porcentagens reais sobre os votos válidos (a cor usa só a disputa PT × PL)
+      const val = e.t26 && e.t26[2];
+      if (!val) return `PT <b>${fmtPct(v, 1)}</b> · PL <b>${fmtPct(1 - v, 1)}</b> (PT+PL)`;
+      return `PT <b>${fmtPct(e.p26[0] / val, 1)}</b> · PL <b>${fmtPct(e.p26[1] / val, 1)}</b> <span class="tt-sub">dos válidos</span>`;
+    }
     case 'dpres': return `<b>${fmtPP(v, 2)} p.p.</b> ${v >= 0 ? 'para o PT' : 'para o PL'}`;
   }
   return '';
