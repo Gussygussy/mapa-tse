@@ -32,6 +32,26 @@ CITY_FIX = {
     'SÃO JOSÉ': (9.9281, -84.0907),
     'ST GEORGES DE LOYAPOCK': (3.8906, -51.8058),
 }
+# locais em outra cidade da jurisdição consular, que o Nominatim não encontrou pelo endereço
+# (prefixo do nome do local -> coordenada aproximada da cidade/local)
+LOCAL_FIX = {
+    'GIFU MEMORIAL CENTER': (35.4570, 136.7630),
+    'HIROSHIMA CITY INTERNATIONAL HOUSE': (34.3830, 132.4760),
+    'ESPAÇO DA PREFEITURA DE TOYOHASHI': (34.7692, 137.3915),
+    'AGF SUZUKA ARENA': (34.8818, 136.5841),
+    'OIZUMI BUNKAMURA': (36.2477, 139.4046),
+    'OSCEOLA HERITAGE PARK': (28.2970, -81.3540),
+    'ADRA HUB - MANITOBA': (49.9040, -97.1100),
+    'PREFEITURA DE ESCH-SUR-ALZETTE': (49.4958, 5.9806),
+    'VALE DO BEKAA': (33.7911, 35.8239),
+    'TWO SEASONS HOTEL': (25.0957, 55.1576),
+    'FLORENÇA': (43.7696, 11.2558),
+    'PORTO RICO': (18.4655, -66.1057),
+    'CANTÃO DE ZENICA-DOBOJ': (44.2017, 17.9078),
+    # endereços que o Nominatim achou no lugar errado
+    'CONSULADO EM PEDRO JUAN CABALLERO': (-22.5470, -55.7330),
+    'CONSULADO-GERAL DO BRASIL EM MENDOZA': (-32.8895, -68.8458),
+}
 _cache = {}
 _last = [0.0]
 
@@ -114,9 +134,16 @@ def main():
         # refaz os que ficaram no ponto da cidade e os das cidades corrigidas
         if key in res and not res[key][2].startswith('cidade') and l['city'] not in CITY_FIX:
             continue
+        if key in res and res[key][2] == 'manual':
+            continue
         city = city_pt.get(l['cd'])
         country = l['bairro'] if l['bairro'].upper() not in GENERIC else ''
         got = None
+        fix = next((v for k, v in LOCAL_FIX.items() if l['name'].upper().startswith(k)), None)
+        if fix:
+            res[key] = [fix[0], fix[1], 'manual']
+            print(i, l['city'], '|', l['name'][:40], '-> manual', flush=True)
+            continue
         for src, q in queries(l, country):
             p = search(q)
             if p and (city is None or km(p, city) <= MAX_KM):
