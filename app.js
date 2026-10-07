@@ -775,7 +775,9 @@ function setupUI() {
 }
 
 // ------------------------------------------------------------------ painel
-const panelState = { tab: 1, parties: null, statuses: new Set(STATUS_ORDER), shown: 60, ctx: null };
+const panelState = { tab: 1, parties: null, statuses: new Set(STATUS_ORDER), shown: 60, ctx: null, query: '', list: null };
+// busca por nome sem acentos nem maiúsculas
+const fold = s => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
 async function loadCand(scope) {
   if (!cand[scope]) cand[scope] = await fetchJSON(`data/cand/${scope}.json`);
@@ -862,6 +864,7 @@ async function openPanel(id) {
   if (!pc.tabs.includes(panelState.tab)) panelState.tab = 1;
   panelState.parties = null;
   panelState.shown = 60;
+  panelState.query = '';
   renderPanel();
 }
 
@@ -921,16 +924,28 @@ function renderPanel() {
       `<button class="chip ${panelState.statuses.has(s) ? 'on' : ''}" data-status="${s}"><i style="background:var(--st-${s})"></i>${STATUS[s]}</button>`).join('')}</div>
   </div>`;
 
-  const filtered = list.filter(c => panelState.parties.has(c.info[2]) && panelState.statuses.has(c.info[3]));
-  const titleExtra = pc.kind === 'pais' && panelState.tab !== 1 ? ' eleitos ou no 2º turno, por UF' : '';
-  html += `<div class="count">${fmtInt.format(filtered.length)} de ${fmtInt.format(list.length)} candidatos${titleExtra}</div>`;
-  if (!filtered.length) html += '<div class="empty">Nenhum candidato com os filtros atuais.</div>';
-  html += filtered.slice(0, panelState.shown).map(c => candCard(c, pc)).join('');
-  if (filtered.length > panelState.shown) html += `<button class="show-more" data-act="more">Mostrar mais (${fmtInt.format(filtered.length - panelState.shown)} restantes)</button>`;
+  html += `<div class="search"><input type="search" id="cand-search" placeholder="Buscar candidato por nome ou número" value="${esc(panelState.query)}" autocomplete="off"></div>`;
+  html += '<div id="cand-list"></div>';
+  panelState.list = list;
 
   const scroll = body.scrollTop;
   body.innerHTML = html;
+  renderCandList();
   body.scrollTop = scroll;
+}
+
+// só a lista (contagem + candidatos), para a busca não perder o foco ao digitar
+function renderCandList() {
+  const pc = panelState.ctx, list = panelState.list || [];
+  const q = fold(panelState.query.trim());
+  const filtered = list.filter(c => panelState.parties.has(c.info[2]) && panelState.statuses.has(c.info[3])
+    && (!q || fold(c.info[0]).includes(q) || fold(c.info[5] || '').includes(q) || String(c.info[1]).startsWith(q)));
+  const titleExtra = pc.kind === 'pais' && panelState.tab !== 1 ? ' eleitos ou no 2º turno, por UF' : '';
+  let html = `<div class="count">${fmtInt.format(filtered.length)} de ${fmtInt.format(list.length)} candidatos${titleExtra}</div>`;
+  if (!filtered.length) html += `<div class="empty">${q ? 'Nenhum candidato encontrado.' : 'Nenhum candidato com os filtros atuais.'}</div>`;
+  html += filtered.slice(0, panelState.shown).map(c => candCard(c, pc)).join('');
+  if (filtered.length > panelState.shown) html += `<button class="show-more" data-act="more">Mostrar mais (${fmtInt.format(filtered.length - panelState.shown)} restantes)</button>`;
+  $('#cand-list').innerHTML = html;
 }
 
 function votacaoCard(t, cargoNome) {
@@ -980,13 +995,19 @@ function candCard(c, pc) {
   </div>`;
 }
 
+$('#panel-body').addEventListener('input', ev => {
+  if (ev.target.id !== 'cand-search') return;
+  panelState.query = ev.target.value;
+  panelState.shown = 60;
+  renderCandList();
+});
 $('#panel-body').addEventListener('click', ev => {
   const b = ev.target.closest('button'); if (!b) return;
   if (b.dataset.tab) { panelState.tab = +b.dataset.tab; panelState.parties = null; panelState.shown = 60; renderPanel(); $('#panel-body').scrollTop = 0; return; }
   if (b.dataset.party) { const s = panelState.parties; s.has(b.dataset.party) ? s.delete(b.dataset.party) : s.add(b.dataset.party); panelState.shown = 60; renderPanel(); return; }
   if (b.dataset.status) { const s = panelState.statuses; s.has(b.dataset.status) ? s.delete(b.dataset.status) : s.add(b.dataset.status); panelState.shown = 60; renderPanel(); return; }
   const act = b.dataset.act;
-  if (act === 'more') { panelState.shown += 100; renderPanel(); }
+  if (act === 'more') { panelState.shown += 100; renderCandList(); }
   if (act === 'pall') { panelState.parties = null; renderPanel(); }
   if (act === 'pnone') { panelState.parties = new Set(); renderPanel(); }
   if (act === 'pmore') { $('#party-chips').classList.remove('collapsed'); b.remove(); }

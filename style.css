@@ -161,6 +161,13 @@ body.panel-open .attribution { right: 448px; }
 .chips.collapsed { max-height: 58px; overflow: hidden; }
 .more-chips { border: 0; background: none; color: var(--accent); cursor: pointer; font-size: 12px; padding: 4px 0 0; }
 
+.search { margin: 4px 0 8px; }
+.search input {
+  width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; color: var(--text);
+  padding: 9px 12px; font: inherit; font-size: 14px; outline: none;
+}
+.search input:focus { border-color: var(--accent); }
+.search input::placeholder { color: var(--text-3); }
 .count { color: var(--text-3); font-size: 12px; margin: 4px 0 8px; }
 .cand {
   display: flex; align-items: center; gap: 12px; background: var(--surface); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 8px;
