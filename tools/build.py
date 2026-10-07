@@ -15,7 +15,10 @@ A pasta bruta deve conter:
 import csv
 import io
 import json
+import math
 import os
+import re
+import unicodedata
 import pickle
 import sys
 import zipfile
@@ -508,6 +511,38 @@ def mun_centroids():
     return out
 
 
+def _norm(s):
+    return re.sub(r'[^A-Z0-9]', '', unicodedata.normalize('NFKD', s.upper()).encode('ascii', 'ignore').decode())
+
+
+def _dist_m(a, b):
+    la1, lo1, la2, lo2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = math.sin((la2 - la1) / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
+    return 6371000 * 2 * math.asin(math.sqrt(h))
+
+
+def same_building(loc, max_m):
+    """loc: {(uf, mun, zona, seção): (lat, lon, nome, ...)}. Agrupa coordenadas de locais com o
+    mesmo nome no mesmo município que estejam a até max_m metros (None = sem limite) e devolve
+    {(mun, lat5, lon5): (lat, lon) canônica}, usando a coordenada com mais seções do grupo."""
+    from collections import Counter
+    by_name = defaultdict(Counter)
+    for k, v in loc.items():
+        by_name[(k[1], _norm(v[2]))][(round(v[0], 5), round(v[1], 5))] += 1
+    canon = {}
+    for (mun, _), cnt in by_name.items():
+        if len(cnt) < 2:
+            continue
+        centers = []
+        for c, _n in cnt.most_common():
+            tgt = next((x for x in centers if max_m is None or _dist_m(c, x) <= max_m), None)
+            if tgt is None:
+                centers.append(c)
+            else:
+                canon[(mun, c[0], c[1])] = tgt
+    return canon
+
+
 def build_locais():
     import random
     from collections import Counter
@@ -521,6 +556,9 @@ def build_locais():
             if v[3] == 'A':
                 sj_nums[(scope, v[4])].add(v[1])
 
+    # Mesmo prédio = mesma coordenada, ou mesmo nome no mesmo município a até 300 m
+    # (o TSE às vezes cadastra o mesmo prédio com coordenadas um pouco diferentes).
+    canon = same_building({k: v for k, v in LOC.items() if v[0] is not None and k[0] != 'zz'}, max_m=300)
     groups = defaultdict(lambda: defaultdict(list))   # uf -> chave do local -> [seções]
     meta = {}
     for k in SEC_T:
@@ -529,6 +567,7 @@ def build_locais():
             continue
         lat, lon, lname, bairro = LOC.get(k, (None, None, '', ''))
         if lat is not None:
+            lat, lon = canon.get((mun, round(lat, 5), round(lon, 5)), (lat, lon))
             key = (mun, round(lat, 5), round(lon, 5))
         else:
             key = (mun, None, lname)
@@ -611,18 +650,30 @@ def build_locais():
     for r in rows('eleitorado_local_votacao_2026.zip', 'eleitorado_local_votacao_2026_ZZ.csv'):
         if r['NR_TURNO'] == '1':
             zz_loc[(r['CD_MUNICIPIO'].zfill(5), int(r['NR_ZONA']), int(r['NR_SECAO']))] = (
-                r['NR_LOCAL_VOTACAO'], r['NM_LOCAL_VOTACAO'])
+                r['NR_LOCAL_VOTACAO'], r['NM_LOCAL_VOTACAO'], r['DS_ENDERECO'])
+    # no exterior, mesmo nome (ou mesmo endereço) na mesma cidade é o mesmo prédio, mesmo que a
+    # geocodificação tenha dado pontos diferentes: todos vão para a coordenada com mais seções
+    zz_pts = {}
+    for k in SEC_T:
+        if k[0] == 'zz' and (k[1], k[2], k[3]) in zz_loc:
+            nr, name, addr = zz_loc[(k[1], k[2], k[3])]
+            c = coords.get(f'{k[1]}-{nr}')
+            if c:
+                zz_pts[k] = (c[0], c[1], name, addr)
+    zz_canon = same_building(zz_pts, max_m=None)
+    zz_canon.update(same_building({k: (v[0], v[1], v[3]) for k, v in zz_pts.items()}, max_m=None))
     pts = defaultdict(lambda: {'secs': [], 'names': set(), 'cities': set(), 'src': set()})
     sem = 0
     for k in SEC_T:
         if k[0] != 'zz':
             continue
-        nr, name = zz_loc.get((k[1], k[2], k[3]), (None, ''))
+        nr, name, _ = zz_loc.get((k[1], k[2], k[3]), (None, '', ''))
         c = coords.get(f'{k[1]}-{nr}')
         if not c:
             sem += 1
             continue
-        g = pts[(round(c[0], 5), round(c[1], 5))]
+        lat, lon = zz_canon.get((k[1], round(c[0], 5), round(c[1], 5)), (c[0], c[1]))
+        g = pts[(round(lat, 5), round(lon, 5))]
         g['secs'].append(k)
         g['names'].add(name)
         g['cities'].add(k[1])
