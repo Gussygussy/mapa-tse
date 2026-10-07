@@ -264,8 +264,8 @@ function metricValues() {
   return currentElements().map(([, e]) => m.get(e)).filter(v => v != null && isFinite(v));
 }
 
-const SEQ = d3.interpolateViridis;
-const DIV = t => d3.interpolateBrBG(t);
+const SEQ = d3.interpolatePlasma;         // azul-escuro → roxo → rosa → laranja → amarelo
+const DIV = t => d3.interpolatePuOr(t);   // queda = roxo, alta = laranja
 const PRES = t => d3.interpolateRdBu(1 - t);       // 0 = PL (azul), 1 = PT (vermelho)
 const NO_DATA = '#3a404c';
 const GOV_BASE = d3.rgb('#252a33');
