@@ -827,7 +827,9 @@ function renderPanel() {
     const pct = cg.list ? r[2] / 100 : (cg.t && cg.t[2] ? votes / cg.t[2] : 0);
     return { sq, votes, pct, info, uf: ufHint || (panelState.tab === 1 ? 'br' : pc.uf) };
   }).filter(c => c.info);
-  list.sort((a, b) => b.pct - a.pct || b.votes - a.votes);
+  // na visão país, deputados federais (de UFs diferentes) são ordenados por votos; o resto, por %
+  const byVotes = pc.kind === 'pais' && panelState.tab === 6;
+  list.sort(byVotes ? (a, b) => b.votes - a.votes : (a, b) => b.pct - a.pct || b.votes - a.votes);
 
   const partyVotes = new Map();
   for (const c of list) partyVotes.set(c.info[2], (partyVotes.get(c.info[2]) || 0) + c.votes);
