@@ -187,6 +187,7 @@ async function init() {
   geo.munMesh = new Path2D(); d3.geoPath(projection, geo.munMesh)(topojson.mesh(munTopo, munObj, (a, b) => a !== b));
 
   buildMapmodes();
+  setupMapmodesCollapse();
   setupZoom();
   setupUI();
   setupGeoSearch();
@@ -737,6 +738,21 @@ function buildMapmodes() {
     setMetric(b.dataset.metric);
   });
   syncMapmodes();
+}
+// No celular o painel de filtros de mapa ocupa muito espaço: começa recolhido (só legenda e
+// título) e um botão abre/fecha. No computador o botão nem aparece (CSS).
+function setupMapmodesCollapse() {
+  const box = $('#mapmodes'), btn = $('#mm-collapse');
+  const mobile = window.matchMedia('(max-width: 760px)');
+  const set = collapsed => {
+    box.classList.toggle('collapsed', collapsed);
+    btn.textContent = collapsed ? 'Mostrar filtros' : 'Esconder filtros';
+    btn.setAttribute('aria-expanded', String(!collapsed));
+  };
+  set(mobile.matches);
+  btn.addEventListener('click', () => set(!box.classList.contains('collapsed')));
+  // ao virar para o computador (ou girar a tela larga), mostra tudo de novo
+  mobile.addEventListener('change', e => { if (!e.matches) set(false); });
 }
 function syncMapmodes() {
   document.querySelectorAll('.mm-btn').forEach(b => {

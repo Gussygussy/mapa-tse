@@ -228,7 +228,20 @@ body.panel-open .attribution { right: 448px; }
   .geosearch { top: 66px; left: 16px; transform: none; }
   body.panel-open .geosearch { left: 16px; }
 }
+/* botão de recolher os filtros: só no celular */
+.mm-collapse { display: none; }
+
 @media (max-width: 760px) {
+  .mm-collapse {
+    display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; margin-bottom: 8px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--text); border-radius: 8px;
+    padding: 7px 10px; font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+  .mm-collapse::after { content: '▴'; font-size: 11px; color: var(--text-3); }
+  .mapmodes.collapsed .mm-collapse { margin-bottom: 6px; }
+  .mapmodes.collapsed .mm-collapse::after { content: '▾'; }
+  .mapmodes.collapsed .mm-grid, .mapmodes.collapsed .mm-toggle, .mapmodes.collapsed .legend .note { display: none; }
+  .mapmodes.collapsed .mm-title { margin-bottom: 0; }
   .panel { width: 100%; }
   body.panel-open .mapmodes { display: none; }
   .mapmodes { width: auto; left: 16px; right: 16px; bottom: 16px; }
