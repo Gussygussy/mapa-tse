@@ -106,7 +106,8 @@ let worldBase = null;  // nível Seção: países do mundo ao fundo { land, bord
 // ------------------------------------------------------------------ canvas
 const canvas = $('#map');
 const ctx = canvas.getContext('2d');
-const overlay = $('#overlay');            // destaques (hover/seleção), redesenhados sem refazer o mapa
+// (cria o canvas se o HTML em cache for de uma versão anterior)
+const overlay = $('#overlay') || $('#map').insertAdjacentElement('afterend', Object.assign(document.createElement('canvas'), { id: 'overlay' }));            // destaques (hover/seleção), redesenhados sem refazer o mapa
 const octx = overlay.getContext('2d');
 const snap = document.createElement('canvas');   // cópia do último desenho completo, usada durante o zoom
 const snapCtx = snap.getContext('2d');
@@ -743,6 +744,7 @@ function buildMapmodes() {
 // título) e um botão abre/fecha. No computador o botão nem aparece (CSS).
 function setupMapmodesCollapse() {
   const box = $('#mapmodes'), btn = $('#mm-collapse');
+  if (!box || !btn) return;   // HTML antigo em cache: segue sem o botão
   const mobile = window.matchMedia('(max-width: 760px)');
   const set = collapsed => {
     box.classList.toggle('collapsed', collapsed);
@@ -752,7 +754,9 @@ function setupMapmodesCollapse() {
   set(mobile.matches);
   btn.addEventListener('click', () => set(!box.classList.contains('collapsed')));
   // ao virar para o computador (ou girar a tela larga), mostra tudo de novo
-  mobile.addEventListener('change', e => { if (!e.matches) set(false); });
+  const onChange = e => { if (!e.matches) set(false); };
+  if (mobile.addEventListener) mobile.addEventListener('change', onChange);
+  else if (mobile.addListener) mobile.addListener(onChange);   // Safari antigo
 }
 function syncMapmodes() {
   document.querySelectorAll('.mm-btn').forEach(b => {
@@ -784,14 +788,16 @@ function setupUI() {
   document.querySelectorAll('.levels button').forEach(b => b.addEventListener('click', () => setLevel(b.dataset.level)));
   $('#panel-close').addEventListener('click', closePanel);
   const st = $('#streets');
-  st.checked = showStreets;
-  $('#attribution').hidden = !showStreets;
-  st.addEventListener('change', () => {
-    showStreets = st.checked;
-    try { localStorage.setItem('mapa-tse:ruas', showStreets ? '1' : '0'); } catch (e) { /* sem storage */ }
-    $('#attribution').hidden = !showStreets;
-    draw();
-  });
+  if (st) {   // HTML antigo em cache pode não ter a opção de ruas
+    st.checked = showStreets;
+    if ($('#attribution')) $('#attribution').hidden = !showStreets;
+    st.addEventListener('change', () => {
+      showStreets = st.checked;
+      try { localStorage.setItem('mapa-tse:ruas', showStreets ? '1' : '0'); } catch (e) { /* sem storage */ }
+      if ($('#attribution')) $('#attribution').hidden = !showStreets;
+      draw();
+    });
+  }
   window.addEventListener('resize', resize);
   window.addEventListener('keydown', ev => { if (ev.key === 'Escape') closePanel(); });
 
@@ -816,6 +822,7 @@ function setupUI() {
 let searchPin = null;
 function setupGeoSearch() {
   const form = $('#geosearch'), input = $('#geosearch-q'), out = $('#geosearch-results'), clear = $('#geosearch-clear');
+  if (!form || !input || !out || !clear) return;   // HTML antigo em cache
   let results = [];
   const close = () => { out.hidden = true; };
   input.addEventListener('input', () => { clear.hidden = !input.value; });
