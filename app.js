@@ -35,6 +35,9 @@ const PARTY_COLORS = {
   REDE: '#2bb3a6', CIDADANIA: '#e85d75', PRD: '#8a94a6', AGIR: '#c08b5c', MOBILIZA: '#a3a35c', DC: '#5c7fa3',
   PRTB: '#4e8a5f', PMB: '#d48ac7', PCO: '#a63d3d', PSTU: '#c44', UP: '#b85454', PCB: '#8f2a2a', 'MISSÃO': '#c9a227',
   DEMOCRATA: '#3f6fb5', PMN: '#6fa36f',
+  // partidos de 2018 (antes de fusões e mudanças de nome)
+  PSL: '#c9b400', PR: '#2453c4', PRB: '#16b39a', DEM: '#3f6fb5', PPS: '#e85d75', PTB: '#4f6d8a', PSC: '#3aa17e',
+  PROS: '#d98c3d', PHS: '#8e7cc3', PATRI: '#5aa9c9', PPL: '#a0522d', PTC: '#7a8b3d', 'PC DO B': '#9e1b28',
 };
 function partyColor(p) {
   if (PARTY_COLORS[p]) return PARTY_COLORS[p];
