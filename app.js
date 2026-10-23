@@ -44,6 +44,21 @@ function partyColor(p) {
 
 const STATUS = { E: 'Eleito', 2: '2º turno', N: 'Não eleito', S: 'Suplente', A: 'Anulado' };
 const STATUS_ORDER = ['E', '2', 'N', 'S', 'A'];
+// ------------------------------------------------------------------ eleições
+// prev: eleição usada nas métricas de variação; right: partido do candidato de direita comparado
+// com o PT no mapa de presidente; fotos: como montar a URL da foto do candidato.
+const ELECTIONS = [
+  { id: '2018-1', label: '2018 · 1º turno', short: '2018 1º', ano: 2018, turno: 1, prev: null, right: 'PSL', fotoCod: '2022802018' },
+  { id: '2018-2', label: '2018 · 2º turno', short: '2018 2º', ano: 2018, turno: 2, prev: null, right: 'PSL', fotoCod: '2022802018' },
+  { id: '2022-1', label: '2022 · 1º turno', short: '2022 1º', ano: 2022, turno: 1, prev: '2018-1', right: 'PL', fotoCod: '2040602022' },
+  { id: '2022-2', label: '2022 · 2º turno', short: '2022 2º', ano: 2022, turno: 2, prev: '2018-2', right: 'PL', fotoCod: '2040602022' },
+  { id: '2026-1', label: '2026 · 1º turno', short: '2026 1º', ano: 2026, turno: 1, prev: '2022-1', right: 'PL' },
+];
+const EL = id => ELECTIONS.find(e => e.id === id);
+const elec = () => EL(state.election);
+const prevYear = () => { const p = elec().prev; return p ? EL(p).ano : null; };
+const dataPath = path => `data/${state.election}/${path}`;
+
 const CARGOS = [
   { id: 1, nome: 'Presidente' }, { id: 3, nome: 'Governador' }, { id: 5, nome: 'Senador' },
   { id: 6, nome: 'Dep. Federal' }, { id: 7, nome: 'Dep. Estadual' },
@@ -61,13 +76,13 @@ const METRICS = [
     get: e => e.t26 ? e.t26[1] : null, icon: 'urn' },
   { id: 'pvot', group: 'Participação', name: '% votos (comparecimento)', kind: 'pct',
     get: e => e.t26 && e.t26[0] ? e.t26[1] / e.t26[0] : null, icon: 'urnpct' },
-  { id: 'dval', group: 'Variação desde 2022', name: 'Δ Votos válidos vs 2022', kind: 'rel', diff: true,
+  { id: 'dval', group: 'Variação', name: 'Δ Votos válidos vs 2022', kind: 'rel', diff: true,
     get: e => e.t26 && e.t22 && e.t22[2] ? e.t26[2] / e.t22[2] - 1 : null, icon: 'check' },
-  { id: 'dpval', group: 'Variação desde 2022', name: 'Δ % votos válidos vs 2022', kind: 'pp', diff: true,
+  { id: 'dpval', group: 'Variação', name: 'Δ % votos válidos vs 2022', kind: 'pp', diff: true,
     get: e => e.t26 && e.t22 && e.t26[0] && e.t22[0] ? e.t26[2] / e.t26[0] - e.t22[2] / e.t22[0] : null, icon: 'checkpct' },
-  { id: 'dvot', group: 'Variação desde 2022', name: 'Δ Votos vs 2022', kind: 'rel', diff: true,
+  { id: 'dvot', group: 'Variação', name: 'Δ Votos vs 2022', kind: 'rel', diff: true,
     get: e => e.t26 && e.t22 && e.t22[1] ? e.t26[1] / e.t22[1] - 1 : null, icon: 'urn' },
-  { id: 'dpvot', group: 'Variação desde 2022', name: 'Δ % votos vs 2022', kind: 'pp', diff: true,
+  { id: 'dpvot', group: 'Variação', name: 'Δ % votos vs 2022', kind: 'pp', diff: true,
     get: e => e.t26 && e.t22 && e.t26[0] && e.t22[0] ? e.t26[1] / e.t26[0] - e.t22[1] / e.t22[0] : null, icon: 'urnpct' },
   { id: 'pres', group: 'Presidente', name: 'Presidente: PT × PL', kind: 'pres',
     get: e => share(e.p26), icon: 'pres' },
@@ -77,6 +92,14 @@ const METRICS = [
     get: e => e.g ? e.g[1] : null, icon: 'gov' },
 ];
 const METRIC = Object.fromEntries(METRICS.map(m => [m.id, m]));
+// nomes que dependem da eleição (ano da comparação e partido de direita)
+function metricName(m) {
+  const y = prevYear() || '—', r = elec().right;
+  return {
+    dval: `Δ Votos válidos vs ${y}`, dpval: `Δ % votos válidos vs ${y}`, dvot: `Δ Votos vs ${y}`, dpvot: `Δ % votos vs ${y}`,
+    pres: `Presidente: PT × ${r}`, dpres: `Presidente: variação PT × ${r} desde ${y}`,
+  }[m.id] || m.name;
+}
 
 const ICONS = {
   check: '<path d="M5 12.5l4.2 4.2L19 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>',
@@ -89,6 +112,7 @@ const ICONS = {
 
 // ------------------------------------------------------------------ estado
 const state = {
+  election: '2026-1',
   level: 'estado',
   metric: 'pres',
   selected: null,      // id do elemento selecionado
@@ -137,8 +161,8 @@ function rewind(f) {
 // ------------------------------------------------------------------ carga inicial
 async function init() {
   const [summary, ufTopo, munTopo, zonaTopo] = await Promise.all([
-    fetchJSON('data/summary.json'), fetchJSON('data/geo/uf.json'), fetchJSON('data/geo/mun.json'),
-    fetchJSON('data/geo/zonas.json'),
+    fetchJSON(dataPath('summary.json')), fetchJSON('data/geo/uf.json'), fetchJSON('data/geo/mun.json'),
+    fetchJSON(dataPath('geo/zonas.json')),
   ]);
   S = summary;
   // IBGE -> TSE
@@ -152,20 +176,13 @@ async function init() {
   ufFeats.forEach(f => f.id = UF_IBGE[f.properties.codarea]);
   const munFeats = topojson.feature(munTopo, munObj).features;
   munFeats.forEach(f => f.id = ibge2tse[f.properties.codarea]);
-  const zonaObj = Object.values(zonaTopo.objects)[0];
-  const zonaFeats = topojson.feature(zonaTopo, zonaObj).features;
-  zonaFeats.forEach(f => { f.id = f.properties.id; rewind(f); });
   const brFeat = { type: 'Feature', id: 'br', geometry: topojson.merge(ufTopo, ufObj.geometries) };
   const ufMesh = topojson.mesh(ufTopo, ufObj, (a, b) => a !== b);
   const brOutline = topojson.mesh(ufTopo, ufObj, (a, b) => a === b);
 
   projection = d3.geoMercator().fitExtent([[40, 40], [1000 - 40, 1000 - 40]], brFeat);
   baseScale = projection.scale();
-  const mk = feats => feats.filter(f => f.id).map(f => {
-    const p = new Path2D(); d3.geoPath(projection, p)(f);
-    const [[x0, y0], [x1, y1]] = d3.geoPath(projection).bounds(f);
-    return { id: f.id, path: p, bbox: [x0, y0, x1, y1], area: (x1 - x0) * (y1 - y0) };
-  });
+  const mk = mkFeats;
   geo.pais = mk([brFeat]);
   // Exterior: elemento físico no mapa, um círculo no Atlântico (canto inferior direito do enquadramento)
   const EX = { cx: 880, cy: 860, r: 58 };
@@ -181,12 +198,12 @@ async function init() {
   geo.exterior = exterior; geo.exLines = exLines;
   geo.estado = mk(ufFeats).concat(exterior);
   geo.municipio = mk(munFeats).concat(exterior);
-  geo.zona = mk(zonaFeats).concat(exterior);
-  geo.zonaMesh = new Path2D(); d3.geoPath(projection, geo.zonaMesh)(topojson.mesh(zonaTopo, zonaObj, (a, b) => a !== b));
+  setZonas(zonaTopo);
   geo.ufMesh = new Path2D(); d3.geoPath(projection, geo.ufMesh)(ufMesh);
   geo.outline = new Path2D(); d3.geoPath(projection, geo.outline)(brOutline);
   geo.munMesh = new Path2D(); d3.geoPath(projection, geo.munMesh)(topojson.mesh(munTopo, munObj, (a, b) => a !== b));
 
+  setupElections();
   buildMapmodes();
   setupMapmodesCollapse();
   setupZoom();
@@ -196,6 +213,70 @@ async function init() {
   resize();
   fitView();
   $('#loading').hidden = true;
+}
+
+function mkFeats(feats) {
+  return feats.filter(f => f.id).map(f => {
+    const p = new Path2D(); d3.geoPath(projection, p)(f);
+    const [[x0, y0], [x1, y1]] = d3.geoPath(projection).bounds(f);
+    return { id: f.id, path: p, bbox: [x0, y0, x1, y1], area: (x1 - x0) * (y1 - y0) };
+  });
+}
+// as zonas eleitorais mudam de uma eleição para outra: cada eleição tem sua geometria
+function setZonas(zonaTopo) {
+  const zonaObj = Object.values(zonaTopo.objects)[0];
+  const zonaFeats = topojson.feature(zonaTopo, zonaObj).features;
+  zonaFeats.forEach(f => { f.id = f.properties.id; rewind(f); });
+  geo.zona = mkFeats(zonaFeats).concat(geo.exterior);
+  geo.zonaMesh = new Path2D(); d3.geoPath(projection, geo.zonaMesh)(topojson.mesh(zonaTopo, zonaObj, (a, b) => a !== b));
+}
+
+// troca de eleição: recarrega resumo e zonas e descarta os caches da eleição anterior
+async function setElection(id) {
+  if (id === state.election || !EL(id)) return;
+  state.election = id;
+  syncElectionTabs();
+  closePanel();
+  $('#loading').hidden = false;
+  $('#loading-text').textContent = `Carregando ${EL(id).label}…`;
+  try {
+    const [summary, zonaTopo] = await Promise.all([fetchJSON(dataPath('summary.json')), fetchJSON(dataPath('geo/zonas.json'))]);
+    if (state.election !== id) return;   // outra troca começou nesse meio-tempo
+    S = summary;
+    setZonas(zonaTopo);
+    for (const k of Object.keys(cand)) delete cand[k];
+    detailCache.clear();
+    sdCache.clear();
+    locais = null; extCities = null;
+    if (METRIC[state.metric].diff && !prevYear()) state.metric = 'pres';
+    if (state.level === 'secao') await loadLocais();
+    $('#loading').hidden = true;
+  } catch (err) {
+    $('#loading-text').textContent = 'Erro ao carregar: ' + err.message;
+    return;
+  }
+  syncMapmodes(); updateScale(); draw();
+}
+function syncElectionTabs() {
+  document.querySelectorAll('#elections button').forEach(b => {
+    const on = b.dataset.el === state.election;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+}
+function setupElections() {
+  const nav = $('#elections');
+  if (!nav) return;
+  nav.innerHTML = ELECTIONS.map(e => `<button type="button" data-el="${e.id}" title="${esc(e.label)}">${e.ano} ${e.turno}º<span class="el-w"> turno</span></button>`).join('');
+  nav.addEventListener('click', ev => { const b = ev.target.closest('button[data-el]'); if (b && !b.disabled) setElection(b.dataset.el); });
+  syncElectionTabs();
+  // eleições cujos dados ainda não foram publicados ficam desativadas
+  for (const e of ELECTIONS) {
+    fetch(`data/${e.id}/summary.json`, { method: 'HEAD' }).then(r => r.ok).catch(() => false).then(ok => {
+      const b = nav.querySelector(`button[data-el="${e.id}"]`);
+      if (b && !ok) { b.disabled = true; b.title = `${e.label} (dados em preparação)`; }
+    });
+  }
 }
 
 // ------------------------------------------------------------------ zoom
@@ -351,8 +432,8 @@ function updateScale() {
     const ramp = m.kind === 'pres' || m.kind === 'dpres' ? PRES : DIV;
     sc.color = v => ramp(l(v)); sc.lo = center - ext; sc.hi = center + ext; sc.center = center; sc.ramp = ramp;
     sc.fmt = m.kind === 'pres' ? (v => fmtPct(v, 0)) : (v => fmtPP(v, ext < 0.05 ? 1 : 0) + (m.kind === 'rel' ? '%' : ' p.p.'));
-    if (m.kind === 'pres') sc.labels = ['PL', 'PT'];
-    if (m.kind === 'dpres') sc.labels = ['→ PL', '→ PT'];
+    if (m.kind === 'pres') sc.labels = [elec().right, 'PT'];
+    if (m.kind === 'dpres') sc.labels = ['→ ' + elec().right, '→ PT'];
   } else if (m.kind === 'gov') {
     let hi = quantile(vals, 0.95);
     if (single || !(hi > 0)) hi = Math.max(vals[0] || 0.2, 0.05);
@@ -376,7 +457,7 @@ function colorOf(e) {
 
 function renderLegend() {
   const m = METRIC[state.metric];
-  $('#mm-title').textContent = m.name;
+  $('#mm-title').textContent = metricName(m);
   const L = $('#legend');
   if (m.kind === 'gov') {
     const ps = (scale.parties || []).slice().sort();
@@ -390,8 +471,8 @@ function renderLegend() {
   L.innerHTML = `<div class="bar" style="background:linear-gradient(90deg,${stops})"></div>
     <div class="ticks"><span>≤ ${scale.fmt(scale.lo)} ${lab[0]}</span>${mid ? `<span>${mid}</span>` : ''}<span>≥ ${scale.fmt(scale.hi)} ${lab[1]}</span></div>
     ${m.kind === 'abs' ? '<div class="note">Escala logarítmica</div>' : ''}
-    ${m.kind === 'dpres' ? '<div class="note">Variação da fatia do PT nos votos PT+PL</div>' : ''}
-    ${m.kind === 'pres' ? '<div class="note">Fatia do PT nos votos PT+PL</div>' : ''}`;
+    ${m.kind === 'dpres' ? `<div class="note">Variação da fatia do PT nos votos PT+${elec().right}</div>` : ''}
+    ${m.kind === 'pres' ? `<div class="note">Fatia do PT nos votos PT+${elec().right}</div>` : ''}`;
 }
 
 // ------------------------------------------------------------------ desenho
@@ -534,10 +615,10 @@ async function loadLocais() {
   $('#loading').hidden = false;
   $('#loading-text').textContent = `Carregando seções… 0/${ufs.length}`;
   const [parts, zzCities] = await Promise.all([
-    Promise.all(ufs.map(uf => fetchJSON(`data/s/${uf}.json`).then(d => {
+    Promise.all(ufs.map(uf => fetchJSON(dataPath(`s/${uf}.json`)).then(d => {
       done++; $('#loading-text').textContent = `Carregando seções… ${done}/${ufs.length}`; d.uf = uf; return d;
     }))),
-    fetchJSON('data/s/zz.json'),
+    fetchJSON(dataPath('s/zz.json')),
   ]);
   const world = await fetchJSON('data/geo/world.json');
   $('#loading').hidden = true;
@@ -675,7 +756,7 @@ function metricText(e) {
     return `<b style="color:${partyColor(e.g[0])}">${esc(e.g[0])}</b> · margem ${fmtPct(e.g[1], 1)}`;
   }
   const v = m.get(e);
-  if (v == null || !isFinite(v)) return m.diff ? (state.level === 'secao' ? 'Sem comparação com 2022 por seção' : 'Sem dados de 2022') : 'Sem dados';
+  if (v == null || !isFinite(v)) return m.diff ? (state.level === 'secao' ? 'Sem comparação por seção' : prevYear() ? `Sem dados de ${prevYear()}` : 'Sem eleição anterior para comparar') : 'Sem dados';
   switch (m.kind) {
     case 'abs': return `<b>${fmtInt.format(v)}</b>`;
     case 'pct': return `<b>${fmtPct(v)}</b>`;
@@ -684,10 +765,11 @@ function metricText(e) {
     case 'pres': {
       // porcentagens reais sobre os votos válidos (a cor usa só a disputa PT × PL)
       const val = e.t26 && e.t26[2];
-      if (!val) return `PT <b>${fmtPct(v, 1)}</b> · PL <b>${fmtPct(1 - v, 1)}</b> (PT+PL)`;
-      return `PT <b>${fmtPct(e.p26[0] / val, 1)}</b> · PL <b>${fmtPct(e.p26[1] / val, 1)}</b> <span class="tt-sub">dos válidos</span>`;
+      const r = elec().right;
+      if (!val) return `PT <b>${fmtPct(v, 1)}</b> · ${r} <b>${fmtPct(1 - v, 1)}</b> (PT+${r})`;
+      return `PT <b>${fmtPct(e.p26[0] / val, 1)}</b> · ${r} <b>${fmtPct(e.p26[1] / val, 1)}</b> <span class="tt-sub">dos válidos</span>`;
     }
-    case 'dpres': return `<b>${fmtPP(v, 2)} p.p.</b> ${v >= 0 ? 'para o PT' : 'para o PL'}`;
+    case 'dpres': return `<b>${fmtPP(v, 2)} p.p.</b> ${v >= 0 ? 'para o PT' : 'para o ' + elec().right}`;
   }
   return '';
 }
@@ -761,8 +843,12 @@ function setupMapmodesCollapse() {
 function syncMapmodes() {
   document.querySelectorAll('.mm-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.metric === state.metric);
-    b.disabled = state.level === 'secao' && METRIC[b.dataset.metric].diff;
-    b.title = METRIC[b.dataset.metric].name + (b.disabled ? ' (sem comparação com 2022 por seção)' : '');
+    const m = METRIC[b.dataset.metric];
+    // variações: sem eleição anterior (2018) ou no nível Seção (a numeração das seções muda)
+    const noPrev = m.diff && !prevYear();
+    b.disabled = m.diff && (state.level === 'secao' || noPrev);
+    b.title = metricName(m) + (noPrev ? ' (sem eleição anterior para comparar)' : b.disabled ? ' (sem comparação por seção)' : '');
+    b.setAttribute('aria-label', b.title);
   });
 }
 function setMetric(id) {
@@ -877,16 +963,16 @@ const panelState = { tab: 1, parties: null, statuses: new Set(STATUS_ORDER), sho
 const fold = s => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
 async function loadCand(scope) {
-  if (!cand[scope]) cand[scope] = await fetchJSON(`data/cand/${scope}.json`);
+  if (!cand[scope]) cand[scope] = await fetchJSON(dataPath(`cand/${scope}.json`)).catch(() => ({}));
   return cand[scope];
 }
 const sdCache = new Map();
 async function loadLocalDetail(mun) {
-  if (!sdCache.has(mun)) sdCache.set(mun, fetchJSON(`data/sd/${mun}.json`));
+  if (!sdCache.has(mun)) sdCache.set(mun, fetchJSON(dataPath(`sd/${mun}.json`)));
   return sdCache.get(mun);
 }
 async function loadDetail(id) {
-  if (!detailCache.has(id)) detailCache.set(id, fetchJSON(`data/d/${id}.json`));
+  if (!detailCache.has(id)) detailCache.set(id, fetchJSON(dataPath(`d/${id}.json`)));
   return detailCache.get(id);
 }
 
@@ -937,7 +1023,7 @@ async function openPanel(id) {
     const byZone = {};
     for (const [z, sec] of d.s) (byZone[z] = byZone[z] || []).push(sec);
     const secTxt = Object.entries(byZone).map(([z, ss]) => `Zona ${z}: ${ss.length > 1 ? 'seções' : 'seção'} ${ss.join(', ')}`).join(' · ');
-    pc = { id, kind: 'local', uf: inf.uf, detail: { c }, tabs: [1, 3, 5], muns: secTxt };
+    pc = { id, kind: 'local', uf: inf.uf, detail: { c }, tabs: [1, 3, 5].filter(cg => c[cg]), muns: secTxt };
    } else {
     const e = S.el[id];
     const detail = await loadDetail(id);
@@ -949,7 +1035,9 @@ async function openPanel(id) {
       : kind === 'estado' ? 'Estado' : kind === 'zona' ? `Zona eleitoral · ${S.uf[uf]}` : `Município · ${uf.toUpperCase()}`;
     $('#panel-title').textContent = kind === 'pais' ? 'Brasil' : kind === 'exterior' ? 'Exterior'
       : kind === 'estado' ? S.uf[id] : kind === 'zona' ? e.n : titleCase(e.n);
-    const tabs = kind === 'pais' ? [1, 3, 5, 6] : kind === 'exterior' ? [1] : [1, 3, 5, 6, 7];
+    // abas só para os cargos com dados (no 2º turno: presidente e, onde houve, governador)
+    const tabs = (kind === 'pais' ? [1, 3, 5, 6] : kind === 'exterior' ? [1] : [1, 3, 5, 6, 7])
+      .filter(cg => detail.c[cg] || (cg === 7 && detail.c[8]));
     pc = { id, kind, uf, detail, tabs, muns: kind === 'zona' ? zoneMuns(e, 12) : null };
    }
   } catch (err) {
@@ -1037,7 +1125,8 @@ function renderCandList() {
   const q = fold(panelState.query.trim());
   const filtered = list.filter(c => panelState.parties.has(c.info[2]) && panelState.statuses.has(c.info[3])
     && (!q || fold(c.info[0]).includes(q) || fold(c.info[5] || '').includes(q) || String(c.info[1]).startsWith(q)));
-  const titleExtra = pc.kind === 'pais' && panelState.tab !== 1 ? ' eleitos ou no 2º turno, por UF' : '';
+  const titleExtra = pc.kind === 'pais' && panelState.tab !== 1
+    ? (elec().turno === 2 ? ' no 2º turno, por UF' : ' eleitos ou no 2º turno, por UF') : '';
   let html = `<div class="count">${fmtInt.format(filtered.length)} de ${fmtInt.format(list.length)} candidatos${titleExtra}</div>`;
   if (!filtered.length) html += `<div class="empty">${q ? 'Nenhum candidato encontrado.' : 'Nenhum candidato com os filtros atuais.'}</div>`;
   html += filtered.slice(0, panelState.shown).map(c => candCard(c, pc)).join('');
@@ -1070,9 +1159,13 @@ function eleitoradoCard(t) {
   </div>`;
 }
 function photoUrl(sq, cargo, uf) {
-  const ele = cargo === 1 ? 6257 : 6259;
-  const scope = cargo === 1 ? 'br' : uf;
-  return `https://resultados.tse.jus.br/oficial/ele2026/${ele}/fotos/${scope}/${sq}.jpeg`;
+  const e = elec();
+  if (e.ano === 2026) {
+    const ele = cargo === 1 ? 6257 : 6259;
+    return `https://resultados.tse.jus.br/oficial/ele2026/${ele}/fotos/${cargo === 1 ? 'br' : uf}/${sq}.jpeg`;
+  }
+  // eleições anteriores: fotos do DivulgaCandContas (se não carregar, aparecem as iniciais)
+  return `https://divulgacandcontas.tse.jus.br/divulga/rest/arquivo/img/${e.fotoCod}/${sq}/${cargo === 1 ? 'BR' : String(uf).toUpperCase()}`;
 }
 function candCard(c, pc) {
   const [nome, num, partido, st, cargo] = c.info;

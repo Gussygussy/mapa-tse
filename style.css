@@ -87,13 +87,28 @@ button { font: inherit; color: inherit; }
 .legend .sw { display: inline-flex; align-items: center; gap: 4px; }
 .legend .sw i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 
+/* abas de eleição */
+.elections {
+  position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 11;
+  display: flex; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 3px; gap: 2px;
+  box-shadow: 0 4px 18px rgba(0,0,0,.35); white-space: nowrap;
+}
+/* com o painel lateral aberto não cabe tudo na mesma linha: empilha abaixo dos níveis */
+body.panel-open .elections { top: 66px; left: 16px; transform: none; }
+body.panel-open .geosearch { top: 116px; left: 16px; transform: none; }
+.elections button {
+  border: 0; background: transparent; padding: 7px 12px; border-radius: 7px; cursor: pointer; color: var(--text-2); font-weight: 500;
+}
+.elections button:hover { color: var(--text); background: var(--surface-2); }
+.elections button.active { background: var(--accent); color: #fff; }
+.elections button:disabled { opacity: .35; cursor: not-allowed; background: transparent; color: var(--text-2); }
+
 /* busca de endereços (Nominatim) */
 .geosearch {
-  position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 12; width: min(420px, calc(100vw - 32px));
+  position: fixed; top: 66px; left: 50%; transform: translateX(-50%); z-index: 12; width: min(420px, calc(100vw - 32px));
   display: flex; align-items: center; gap: 8px; padding: 0 10px; height: 42px;
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 4px 18px rgba(0,0,0,.35);
 }
-body.panel-open .geosearch { left: calc((100vw - 440px) / 2); }
 .geosearch:focus-within { border-color: var(--accent); }
 .geosearch > svg { width: 18px; height: 18px; color: var(--text-3); flex: none; }
 .geosearch input { flex: 1; min-width: 0; background: none; border: 0; outline: none; color: var(--text); font: inherit; font-size: 14px; }
@@ -224,14 +239,19 @@ body.panel-open .attribution { right: 448px; }
 .show-more:hover { color: var(--text); }
 .empty { color: var(--text-3); padding: 18px 4px; text-align: center; }
 
-@media (max-width: 1100px) {
-  .geosearch { top: 66px; left: 16px; transform: none; }
+@media (max-width: 1250px) {
+  .elections { top: 66px; left: 16px; transform: none; }
+  body.panel-open .elections { left: 16px; }
+  .geosearch { top: 116px; left: 16px; transform: none; }
   body.panel-open .geosearch { left: 16px; }
 }
 /* botão de recolher os filtros: só no celular */
 .mm-collapse { display: none; }
 
 @media (max-width: 760px) {
+  .elections { max-width: calc(100vw - 32px); overflow-x: auto; scrollbar-width: none; }
+  .elections button { padding: 7px 9px; }
+  .elections .el-w { display: none; }
   .mm-collapse {
     display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; margin-bottom: 8px;
     border: 1px solid var(--border); background: var(--surface-2); color: var(--text); border-radius: 8px;

@@ -26,7 +26,7 @@ from collections import defaultdict
 
 RAW = sys.argv[1]
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
-OUT = os.path.join(ROOT, 'data')
+OUT = os.path.join(ROOT, 'data', '2026-1')   # dados desta eleição; malhas comuns ficam em data/geo
 CACHE = os.path.join(RAW, 'cache')
 os.makedirs(CACHE, exist_ok=True)
 
