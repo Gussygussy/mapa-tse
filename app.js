@@ -56,6 +56,9 @@ const ELECTIONS = [
   { id: '2022-1', label: '2022 · 1º turno', short: '2022 1º', ano: 2022, turno: 1, prev: '2018-1', right: 'PL', fotoCod: '2040602022' },
   { id: '2022-2', label: '2022 · 2º turno', short: '2022 2º', ano: 2022, turno: 2, prev: '2018-2', right: 'PL', fotoCod: '2040602022' },
   { id: '2026-1', label: '2026 · 1º turno', short: '2026 1º', ano: 2026, turno: 1, prev: '2022-1', right: 'PL' },
+  // 2º turno de 2026: ao vivo, lido direto da API de resultados do TSE (ver "ao vivo" abaixo)
+  { id: '2026-2', label: '2026 · 2º turno', short: '2026 2º', ano: 2026, turno: 2, prev: '2022-2', right: 'PL',
+    live: { pres: 6258, gov: 6260, govUFs: ['ac', 'am', 'df', 'es', 'rn', 'to'], base: '2026-1' } },
 ];
 const EL = id => ELECTIONS.find(e => e.id === id);
 const elec = () => EL(state.election);
@@ -91,6 +94,8 @@ const METRICS = [
     get: e => share(e.p26), icon: 'pres' },
   { id: 'dpres', group: 'Presidente', name: 'Presidente: variação PT × PL desde 2022', kind: 'dpres', diff: true,
     get: e => { const a = share(e.p26), b = share(e.p22); return a == null || b == null ? null : a - b; }, icon: 'pres' },
+  { id: 'apur', group: 'Apuração', name: '% das seções apuradas', kind: 'prog', liveOnly: true,
+    get: e => e.apur && e.apur[1] ? e.apur[0] / e.apur[1] : null, icon: 'prog' },
   { id: 'gov', group: 'Governador', name: 'Governador: partido mais votado', kind: 'gov',
     get: e => e.g ? e.g[1] : null, icon: 'gov' },
 ];
@@ -110,6 +115,7 @@ const ICONS = {
   urn: '<rect x="4" y="10" width="16" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 10V4h8v6M10 7h4" fill="none" stroke="currentColor" stroke-width="1.8"/>',
   urnpct: '<rect x="2.5" y="11" width="12" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 11V6h6v5" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="17" cy="5.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="21" cy="11" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M21.6 4.5l-5.2 7.6" stroke="currentColor" stroke-width="1.4"/>',
   pres: '<path d="M12 3a9 9 0 0 1 0 18z" fill="#d7263d"/><path d="M12 3a9 9 0 0 0 0 18z" fill="#2453c4"/>',
+  prog: '<circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2" opacity=".35"/><path d="M12 3.5a8.5 8.5 0 0 1 8.2 10.7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M8.5 12.3l2.4 2.4 4.6-4.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
   gov: '<path d="M4 20h16M6 20v-8M10 20v-8M14 20v-8M18 20v-8M3 10l9-6 9 6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
 };
 
@@ -242,15 +248,24 @@ async function setElection(id) {
   closePanel();
   $('#loading').hidden = false;
   $('#loading-text').textContent = `Carregando ${EL(id).label}…`;
+  stopLive();
   try {
-    const [summary, zonaTopo] = await Promise.all([fetchJSON(dataPath('summary.json')), fetchJSON(dataPath('geo/zonas.json'))]);
-    if (state.election !== id) return;   // outra troca começou nesse meio-tempo
-    S = summary;
-    setZonas(zonaTopo);
     for (const k of Object.keys(cand)) delete cand[k];
     detailCache.clear();
     sdCache.clear();
     locais = null; extCities = null;
+    if (EL(id).live) {
+      await startLive(EL(id));
+      if (state.election !== id) return;
+      $('#loading').hidden = true;
+      syncLevels();
+      syncMapmodes(); updateScale(); draw();
+      return;
+    }
+    const [summary, zonaTopo] = await Promise.all([fetchJSON(dataPath('summary.json')), fetchJSON(dataPath('geo/zonas.json'))]);
+    if (state.election !== id) return;   // outra troca começou nesse meio-tempo
+    S = summary;
+    setZonas(zonaTopo);
     if (METRIC[state.metric].diff && !prevYear()) state.metric = 'pres';
     if (state.level === 'secao') await loadLocais();
     $('#loading').hidden = true;
@@ -258,8 +273,199 @@ async function setElection(id) {
     $('#loading-text').textContent = 'Erro ao carregar: ' + err.message;
     return;
   }
+  syncLevels();
   syncMapmodes(); updateScale(); draw();
 }
+// durante a apuração ao vivo só País e Estado (municípios/zonas/seções exigiriam milhares de
+// arquivos do TSE a cada atualização)
+const LIVE_LEVELS = ['pais', 'estado'];
+function syncLevels() {
+  const live = !!elec().live;
+  document.querySelectorAll('.levels button').forEach(b => {
+    const off = live && !LIVE_LEVELS.includes(b.dataset.level);
+    b.disabled = off;
+    b.title = off ? 'Disponível quando a apuração terminar' : '';
+  });
+  if (live && !LIVE_LEVELS.includes(state.level)) {
+    state.level = 'estado';
+    document.querySelectorAll('.levels button').forEach(b => b.classList.toggle('active', b.dataset.level === 'estado'));
+  }
+}
+
+// ------------------------------------------------------------------ ao vivo
+// Lê a API de resultados do TSE a cada 15 s. Estado = arquivo da UF; Brasil = soma das UFs +
+// exterior (o arquivo nacional costuma atrasar em relação aos estaduais).
+const LIVE_MS = 15000;
+const live = { timer: null, el: null, base: null, prev: null, last: null, fetchedAt: null, busy: false,
+  cache: {}, wait: LIVE_MS, limited: false };
+// busca em lotes pequenos (o TSE responde 429 a muitas requisições simultâneas)
+async function pooled(items, n, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+  await Promise.all(Array.from({ length: n }, async () => {
+    while (i < items.length) { const k = i++; out[k] = await fn(items[k]); }
+  }));
+  return out;
+}
+function liveUrl(ele, uf, cargo) {
+  return `https://resultados.tse.jus.br/oficial/ele2026/${ele}/dados/${uf}/${uf}-c${String(cargo).padStart(4, '0')}-e${String(ele).padStart(6, '0')}-u.json`;
+}
+function liveStatus(c) {
+  if (/anulad/i.test(c.dvt || '')) return 'A';
+  const st = (c.st || '').toLowerCase();
+  if (st.startsWith('eleito') || st.includes('matematicamente eleito')) return 'E';
+  if (st.includes('2º turno')) return '2';
+  return 'N';
+}
+// arquivo -u.json do TSE -> {t, v, cands, secoes, hora}
+function parseLive(d, cargo) {
+  const c = d.carg[0], out = { v: [], cands: {} };
+  for (const a of c.agr || []) for (const p of a.par || []) for (const x of p.cand || []) {
+    out.cands[x.sqcand] = [x.nmu, x.n, p.sg, liveStatus(x), cargo, x.nm, a.com || p.sg];
+    out.v.push([x.sqcand, +x.vap || 0]);
+  }
+  out.v.sort((a, b) => b[1] - a[1]);
+  const e = d.e || {}, v = d.v || {}, sc = d.s || {};
+  out.t = [+e.te || 0, +e.c || 0, +v.vv || 0, +v.vb || 0, +v.tvn || 0, +v.vansj || 0];
+  out.secoes = [+sc.st || 0, +sc.ts || 0];   // seções totalizadas, total de seções
+  out.hora = `${d.dg} ${d.hg}`;
+  return out;
+}
+// devolve o dado novo, ou o último dado bom daquela UF se o TSE recusar (429) ou falhar
+async function liveFetch(ele, uf, cargo) {
+  const key = `${ele}/${uf}`;
+  try {
+    const r = await fetch(liveUrl(ele, uf, cargo), { cache: 'no-cache' });
+    if (r.status === 429) live.limited = true;
+    if (!r.ok) throw new Error(`TSE ${r.status}`);
+    const d = parseLive(await r.json(), cargo);
+    live.cache[key] = d;
+    return d;
+  } catch (e) {
+    const old = live.cache[key];
+    return old ? { ...old, stale: true } : null;
+  }
+}
+async function startLive(el) {
+  live.el = el;
+  // estrutura (nomes, UFs) da 1ª rodada e comparação com o 2º turno de 2022
+  const [base, prev, zonaTopo] = await Promise.all([
+    fetchJSON(`data/${el.live.base}/summary.json`), fetchJSON(`data/${el.prev}/summary.json`).catch(() => ({ el: {} })),
+    fetchJSON(`data/${el.live.base}/geo/zonas.json`),
+  ]);
+  live.base = base; live.prev = prev;
+  setZonas(zonaTopo);
+  await liveTick(true);
+  scheduleLive();
+}
+// a cada 15 s; se o TSE estiver limitando, espaça (até 60 s) e volta aos 15 s quando normalizar
+function scheduleLive() {
+  clearTimeout(live.timer);
+  live.timer = setTimeout(async () => {
+    if (document.visibilityState === 'visible') await liveTick(false);
+    if (live.el) scheduleLive();
+  }, live.wait);
+}
+function stopLive() {
+  clearTimeout(live.timer);
+  live.timer = null; live.el = null;
+  const b = $('#live-status'); if (b) b.hidden = true;
+}
+async function liveTick(first) {
+  if (live.busy || !live.el) return;
+  live.busy = true;
+  const el = live.el, ufs = Object.keys(live.base.uf);   // inclui 'zz' (exterior)
+  try {
+    live.limited = false;
+    const pres = await pooled(ufs, 4, uf => liveFetch(el.live.pres, uf, 1));
+    // UFs que nunca responderam: mais uma tentativa, uma por vez
+    for (let i = 0; i < ufs.length; i++) {
+      if (pres[i]) continue;
+      await new Promise(r => setTimeout(r, 800));
+      pres[i] = await liveFetch(el.live.pres, ufs[i], 1);
+    }
+    const gov = await pooled(el.live.govUFs, 3, uf => liveFetch(el.live.gov, uf, 3));
+    live.wait = live.limited ? Math.min(60000, live.wait * 2) : LIVE_MS;
+    if (live.el !== el) return;
+    const elx = {}, sq = {};
+    let pt = null, pl = null;
+    const brT = [0, 0, 0, 0, 0, 0], brV = new Map(), sec = [0, 0];
+    let hora = '';
+    ufs.forEach((uf, i) => {
+      const r = pres[i];
+      if (!r) return;
+      Object.assign(sq, r.cands);
+      r.t.forEach((x, j) => brT[j] += x);
+      for (const [k, v] of r.v) brV.set(k, (brV.get(k) || 0) + v);
+      sec[0] += r.secoes[0]; sec[1] += r.secoes[1];
+      if (r.hora > hora) hora = r.hora;
+    });
+    for (const [k, c] of Object.entries(sq)) { if (c[1] === '13') pt = k; if (c[1] === '22') pl = k; }
+    const pp = v => { const d = new Map(v); return [d.get(pt) || 0, d.get(pl) || 0]; };
+    const P = live.prev.el || {};
+    const mk = (id, name, uf, t, v, g, apur) => ({ n: name, uf, t26: t, t22: P[id] ? P[id].t26 : null, p26: pp(v), p22: P[id] ? P[id].p26 : null, g, apur });
+    for (const k of Object.keys(cand)) delete cand[k];
+    detailCache.clear();
+    cand.br = sq;
+    const brv = [...brV.entries()].sort((a, b) => b[1] - a[1]);
+    elx.br = mk('br', 'Brasil', 'br', brT, brv, null, sec);
+    const govList = [];
+    ufs.forEach((uf, i) => {
+      const r = pres[i];
+      if (!r) return;
+      const gi = el.live.govUFs.indexOf(uf), g = gi >= 0 ? gov[gi] : null;
+      const c = { 1: { t: r.t, v: r.v } };
+      let gs = null;
+      if (g) {
+        cand[uf] = g.cands;
+        c[3] = { t: g.t, v: g.v };
+        const base = g.t[2] + g.t[5];
+        if (g.v.length && g.t[2]) gs = [g.cands[g.v[0][0]][2], (g.v[0][1] - (g.v[1] ? g.v[1][1] : 0)) / g.t[2], g.v[0][0]];
+        for (const [k, v] of g.v) govList.push([k, v, base ? Math.round(10000 * v / base) / 100 : 0, uf]);
+      }
+      elx[uf] = mk(uf, live.base.uf[uf], uf, r.t, r.v, gs, r.secoes);
+      detailCache.set(uf, Promise.resolve({ c }));
+    });
+    govList.sort((a, b) => b[2] - a[2]);
+    const brc = { 1: { t: brT, v: brv } };
+    if (govList.length) brc[3] = { v: govList, list: true };
+    detailCache.set('br', Promise.resolve({ c: brc }));
+    S = { el: elx, uf: live.base.uf, pt, pl, meta: { ano: 2026, turno: 2, live: true } };
+    live.last = { hora, sec, ok: pres.filter(r => r && !r.stale).length, stale: pres.filter(r => r && r.stale).length,
+      missing: pres.filter(r => !r).length, n: ufs.length };
+    live.fetchedAt = new Date();
+    renderLiveStatus();
+    if (!first) {
+      updateScale(); draw();
+      if (state.selected != null && panelState.ctx) refreshPanel();
+    }
+  } finally {
+    live.busy = false;
+  }
+}
+function renderLiveStatus() {
+  const b = $('#live-status');
+  if (!b || !live.last) return;
+  const { hora, sec, stale, missing } = live.last;
+  const pct = sec[1] ? sec[0] / sec[1] : 0;
+  const at = live.fetchedAt.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+  const notes = [];
+  if (stale) notes.push(`${stale} UF(s) com o dado anterior`);
+  if (missing) notes.push(`${missing} UF(s) ainda sem dados`);
+  const every = live.wait > LIVE_MS ? `TSE limitando acessos: a cada ${Math.round(live.wait / 1000)} s` : 'a cada 15 s';
+  b.innerHTML = `<span class="live-dot"></span><b>AO VIVO</b> · ${fmtPct(pct, 2)} das seções apuradas
+    <small>Dados do TSE de ${esc(hora)} · buscados às ${at} (Brasília) · ${every}${notes.length ? ' · ' + notes.join(' · ') : ''}</small>`;
+  b.hidden = false;
+}
+async function refreshPanel() {
+  const pc = panelState.ctx;
+  try {
+    const detail = await loadDetail(pc.id);
+    pc.detail = detail;
+    renderPanel();
+  } catch (e) { /* mantém o que já está na tela */ }
+}
+
 function syncElectionTabs() {
   document.querySelectorAll('#elections button').forEach(b => {
     const on = b.dataset.el === state.election;
@@ -274,7 +480,7 @@ function setupElections() {
   nav.addEventListener('click', ev => { const b = ev.target.closest('button[data-el]'); if (b && !b.disabled) setElection(b.dataset.el); });
   syncElectionTabs();
   // eleições cujos dados ainda não foram publicados ficam desativadas
-  for (const e of ELECTIONS) {
+  for (const e of ELECTIONS.filter(x => !x.live)) {
     fetch(`data/${e.id}/summary.json`, { method: 'HEAD' }).then(r => r.ok).catch(() => false).then(ok => {
       const b = nav.querySelector(`button[data-el="${e.id}"]`);
       if (b && !ok) { b.disabled = true; b.title = `${e.label} (dados em preparação)`; }
@@ -437,6 +643,10 @@ function updateScale() {
     sc.fmt = m.kind === 'pres' ? (v => fmtPct(v, 0)) : (v => fmtPP(v, ext < 0.05 ? 1 : 0) + (m.kind === 'rel' ? '%' : ' p.p.'));
     if (m.kind === 'pres') sc.labels = [elec().right, 'PT'];
     if (m.kind === 'dpres') sc.labels = ['→ ' + elec().right, '→ PT'];
+  } else if (m.kind === 'prog') {
+    // andamento da apuração: escala fixa de 0% a 100%
+    const l = d3.scaleLinear().domain([0, 1]).clamp(true);
+    sc.color = v => SEQ(l(v)); sc.lo = 0; sc.hi = 1; sc.fixed = true; sc.ramp = SEQ; sc.fmt = v => fmtPct(v, 0);
   } else if (m.kind === 'gov') {
     let hi = quantile(vals, 0.95);
     if (single || !(hi > 0)) hi = Math.max(vals[0] || 0.2, 0.05);
@@ -472,7 +682,7 @@ function renderLegend() {
   const mid = scale.center != null ? scale.fmt(scale.center).replace(/^[+−]/, '') : '';
   const lab = scale.labels || ['', ''];
   L.innerHTML = `<div class="bar" style="background:linear-gradient(90deg,${stops})"></div>
-    <div class="ticks"><span>≤ ${scale.fmt(scale.lo)} ${lab[0]}</span>${mid ? `<span>${mid}</span>` : ''}<span>≥ ${scale.fmt(scale.hi)} ${lab[1]}</span></div>
+    <div class="ticks"><span>${scale.fixed ? '' : '≤ '}${scale.fmt(scale.lo)} ${lab[0]}</span>${mid ? `<span>${mid}</span>` : ''}<span>${scale.fixed ? '' : '≥ '}${scale.fmt(scale.hi)} ${lab[1]}</span></div>
     ${m.kind === 'abs' ? '<div class="note">Escala logarítmica</div>' : ''}
     ${m.kind === 'dpres' ? `<div class="note">Variação da fatia do PT nos votos PT+${elec().right}</div>` : ''}
     ${m.kind === 'pres' ? `<div class="note">Fatia do PT nos votos PT+${elec().right}</div>` : ''}`;
@@ -762,6 +972,7 @@ function metricText(e) {
   if (v == null || !isFinite(v)) return m.diff ? (state.level === 'secao' ? 'Sem comparação por seção' : prevYear() ? `Sem dados de ${prevYear()}` : 'Sem eleição anterior para comparar') : 'Sem dados';
   switch (m.kind) {
     case 'abs': return `<b>${fmtInt.format(v)}</b>`;
+    case 'prog': return `<b>${fmtPct(v, 2)}</b> das seções apuradas · <b>${fmtInt.format(e.t26 ? e.t26[1] : 0)}</b> votos apurados`;
     case 'pct': return `<b>${fmtPct(v)}</b>`;
     case 'rel': return `<b>${fmtPP(v, 2)}%</b>`;
     case 'pp': return `<b>${fmtPP(v, 2)} p.p.</b>`;
@@ -814,7 +1025,7 @@ function buildMapmodes() {
   const grid = $('#mm-grid');
   let html = '', group = '';
   for (const m of METRICS) {
-    if (m.group !== group) { group = m.group; html += `<div class="mm-group-label">${group}</div>`; }
+    if (m.group !== group) { group = m.group; html += `<div class="mm-group-label"${m.liveOnly ? ' data-live-only' : ''}>${group}</div>`; }
     html += `<button class="mm-btn" data-metric="${m.id}" title="${esc(m.name)}" aria-label="${esc(m.name)}">
       <svg viewBox="0 0 24 24">${ICONS[m.icon]}</svg>${m.diff ? '<span class="delta">Δ</span>' : ''}</button>`;
   }
@@ -844,9 +1055,12 @@ function setupMapmodesCollapse() {
   else if (mobile.addListener) mobile.addListener(onChange);   // Safari antigo
 }
 function syncMapmodes() {
+  document.querySelectorAll('.mm-group-label[data-live-only]').forEach(l => { l.hidden = !elec().live; });
+  if (METRIC[state.metric].liveOnly && !elec().live) state.metric = 'pres';
   document.querySelectorAll('.mm-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.metric === state.metric);
     const m = METRIC[b.dataset.metric];
+    b.hidden = !!m.liveOnly && !elec().live;
     // variações: sem eleição anterior (2018) ou no nível Seção (a numeração das seções muda)
     const noPrev = m.diff && !prevYear();
     b.disabled = m.diff && (state.level === 'secao' || noPrev);
@@ -874,7 +1088,7 @@ async function setLevel(lv) {
 }
 
 function setupUI() {
-  document.querySelectorAll('.levels button').forEach(b => b.addEventListener('click', () => setLevel(b.dataset.level)));
+  document.querySelectorAll('.levels button').forEach(b => b.addEventListener('click', () => { if (!b.disabled) setLevel(b.dataset.level); }));
   $('#panel-close').addEventListener('click', closePanel);
   const st = $('#streets');
   if (st) {   // HTML antigo em cache pode não ter a opção de ruas
@@ -1164,7 +1378,7 @@ function eleitoradoCard(t) {
 function photoUrl(sq, cargo, uf) {
   const e = elec();
   if (e.ano === 2026) {
-    const ele = cargo === 1 ? 6257 : 6259;
+    const ele = e.live ? (cargo === 1 ? e.live.pres : e.live.gov) : (cargo === 1 ? 6257 : 6259);
     return `https://resultados.tse.jus.br/oficial/ele2026/${ele}/fotos/${cargo === 1 ? 'br' : uf}/${sq}.jpeg`;
   }
   // eleições anteriores: fotos do DivulgaCandContas (se não carregar, aparecem as iniciais)

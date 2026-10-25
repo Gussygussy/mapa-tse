@@ -103,6 +103,19 @@ body.panel-open .geosearch { top: 116px; left: 16px; transform: none; }
 .elections button.active { background: var(--accent); color: #fff; }
 .elections button:disabled { opacity: .35; cursor: not-allowed; background: transparent; color: var(--text-2); }
 
+/* selo da apuração ao vivo */
+.live-status {
+  position: fixed; right: 16px; top: 16px; z-index: 11; max-width: 360px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 7px 12px;
+  box-shadow: 0 4px 18px rgba(0,0,0,.35); font-size: 13px; color: var(--text); line-height: 1.35;
+}
+.live-status[hidden] { display: none; }
+.live-status small { display: block; color: var(--text-3); font-size: 11.5px; }
+.live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #f85149; margin-right: 6px; vertical-align: 1px; animation: livepulse 1.6s infinite; }
+@keyframes livepulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+body.panel-open .live-status { right: 456px; }
+.levels button:disabled { opacity: .35; cursor: not-allowed; }
+
 /* busca de endereços (Nominatim) */
 .geosearch {
   position: fixed; top: 66px; left: 50%; transform: translateX(-50%); z-index: 12; width: min(420px, calc(100vw - 32px));
@@ -240,6 +253,8 @@ body.panel-open .attribution { right: 448px; }
 .empty { color: var(--text-3); padding: 18px 4px; text-align: center; }
 
 @media (max-width: 1250px) {
+  .live-status { top: 166px; left: 16px; right: auto; }
+  body.panel-open .live-status { right: auto; }
   .elections { top: 66px; left: 16px; transform: none; }
   body.panel-open .elections { left: 16px; }
   .geosearch { top: 116px; left: 16px; transform: none; }
