@@ -276,9 +276,9 @@ async function setElection(id) {
   syncLevels();
   syncMapmodes(); updateScale(); draw();
 }
-// durante a apuração ao vivo só País e Estado (municípios/zonas/seções exigiriam milhares de
-// arquivos do TSE a cada atualização)
-const LIVE_LEVELS = ['pais', 'estado'];
+// durante a apuração ao vivo: País, Estado e Município (zonas e seções exigiriam dezenas de
+// milhares de arquivos do TSE)
+const LIVE_LEVELS = ['pais', 'estado', 'municipio'];
 function syncLevels() {
   const live = !!elec().live;
   document.querySelectorAll('.levels button').forEach(b => {
@@ -293,22 +293,48 @@ function syncLevels() {
 }
 
 // ------------------------------------------------------------------ ao vivo
-// Lê a API de resultados do TSE a cada 15 s. Estado = arquivo da UF; Brasil = soma das UFs +
-// exterior (o arquivo nacional costuma atrasar em relação aos estaduais).
-const LIVE_MS = 15000;
+// Lê a API de resultados do TSE. Estado = arquivo da UF; Brasil = soma das UFs + exterior (o
+// arquivo nacional costuma atrasar em relação aos estaduais). Municípios: um arquivo cada,
+// atualizados aos poucos com a sobra do limite de acessos (e na hora quando clicados).
+const LIVE_MS = 15000;       // estados
+const LIVE_MUN_MS = 30000;   // estados, enquanto o nível Município está aberto (libera acessos)
+const AB_MS = 120000;        // andamento de todos os municípios (1 arquivo por UF)
+const MUN_STALE = 10 * 60000;
 const live = { timer: null, el: null, base: null, prev: null, last: null, fetchedAt: null, busy: false,
-  cache: {}, wait: LIVE_MS, limited: false };
-// busca em lotes pequenos (o TSE responde 429 a muitas requisições simultâneas)
-async function pooled(items, n, fn) {
-  const out = new Array(items.length);
-  let i = 0;
-  await Promise.all(Array.from({ length: n }, async () => {
-    while (i < items.length) { const k = i++; out[k] = await fn(items[k]); }
-  }));
-  return out;
+  cache: {}, wait: LIVE_MS, limited: false, mun: {}, ab: {}, abAt: 0, munBusy: 0, munFetched: 0, gen: 0 };
+
+// fila única de pedidos ao TSE: o site aceita ~2,5 pedidos/s por visitante e responde 429 acima
+// disso. Prioridades: 0 clique, 1 estados, 2 andamento/governador, 3 municípios em segundo plano.
+const TSE_RATE = 2.2;
+const tseQ = [[], [], [], []];
+let tsePumping = false, tseTokens = 5, tseRefill = Date.now(), tseSlow = 0;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function tseGet(url, prio) {
+  return new Promise(res => { tseQ[prio].push({ url, res }); tsePump(); });
 }
-function liveUrl(ele, uf, cargo) {
-  return `https://resultados.tse.jus.br/oficial/ele2026/${ele}/dados/${uf}/${uf}-c${String(cargo).padStart(4, '0')}-e${String(ele).padStart(6, '0')}-u.json`;
+async function tsePump() {
+  if (tsePumping) return;
+  tsePumping = true;
+  while (tseQ.some(q => q.length)) {
+    const rate = TSE_RATE / (tseSlow > Date.now() ? 2.5 : 1);
+    tseTokens = Math.min(5, tseTokens + (Date.now() - tseRefill) / 1000 * rate);
+    tseRefill = Date.now();
+    if (tseTokens < 1) { await sleep((1 - tseTokens) / rate * 1000); continue; }
+    tseTokens -= 1;
+    const job = tseQ.find(q => q.length).shift();   // escolhe na hora de enviar: o clique fura a fila
+    fetch(job.url, { cache: 'no-cache' }).then(async r => {
+      if (r.status === 429) { live.limited = true; tseSlow = Date.now() + 30000; }
+      job.res(r.ok ? await r.json().catch(() => null) : null);
+    }, () => job.res(null));
+  }
+  tsePumping = false;
+}
+function tseClear() {
+  for (const q of tseQ) while (q.length) q.shift().res(null);
+}
+
+function liveUrl(ele, uf, cargo, mun = '') {
+  return `https://resultados.tse.jus.br/oficial/ele2026/${ele}/dados/${uf}/${uf}${mun}-c${String(cargo).padStart(4, '0')}-e${String(ele).padStart(6, '0')}-u.json`;
 }
 function liveStatus(c) {
   if (/anulad/i.test(c.dvt || '')) return 'A';
@@ -331,23 +357,19 @@ function parseLive(d, cargo) {
   out.hora = `${d.dg} ${d.hg}`;
   return out;
 }
-// devolve o dado novo, ou o último dado bom daquela UF se o TSE recusar (429) ou falhar
-async function liveFetch(ele, uf, cargo) {
-  const key = `${ele}/${uf}`;
-  try {
-    const r = await fetch(liveUrl(ele, uf, cargo), { cache: 'no-cache' });
-    if (r.status === 429) live.limited = true;
-    if (!r.ok) throw new Error(`TSE ${r.status}`);
-    const d = parseLive(await r.json(), cargo);
-    live.cache[key] = d;
-    return d;
-  } catch (e) {
-    const old = live.cache[key];
-    return old ? { ...old, stale: true } : null;
+// devolve o dado novo, ou o último dado bom se o TSE recusar (429) ou falhar
+async function liveFetch(ele, uf, cargo, prio = 1, mun = '') {
+  const key = `${ele}/${uf}${mun}`;
+  const d = await tseGet(liveUrl(ele, uf, cargo, mun), prio);
+  if (d && d.carg) {
+    try { return (live.cache[key] = parseLive(d, cargo)); } catch (e) { /* formato inesperado */ }
   }
+  const old = live.cache[key];
+  return old ? { ...old, stale: true } : null;
 }
 async function startLive(el) {
-  live.el = el;
+  live.el = el; live.gen++;
+  live.mun = {}; live.ab = {}; live.abAt = 0; live.munFetched = 0;
   // estrutura (nomes, UFs) da 1ª rodada e comparação com o 2º turno de 2022
   const [base, prev, zonaTopo] = await Promise.all([
     fetchJSON(`data/${el.live.base}/summary.json`), fetchJSON(`data/${el.prev}/summary.json`).catch(() => ({ el: {} })),
@@ -355,37 +377,148 @@ async function startLive(el) {
   ]);
   live.base = base; live.prev = prev;
   setZonas(zonaTopo);
-  await liveTick(true);
-  scheduleLive();
+  // o mapa aparece logo (sem dados) e os estados chegam em ~15 s, no ritmo que o TSE aceita
+  S = { el: {}, uf: base.uf, pt: null, pl: null, meta: { ano: 2026, turno: 2, live: true } };
+  live.last = null;
+  const b = $('#live-status');
+  if (b) { b.innerHTML = '<span class="live-dot"></span><b>AO VIVO</b> · buscando os estados no TSE…'; b.hidden = false; }
+  liveTick(false).then(() => { if (live.el === el) { scheduleLive(); munLoop(live.gen); } });
 }
-// a cada 15 s; se o TSE estiver limitando, espaça (até 60 s) e volta aos 15 s quando normalizar
+// estados a cada 15 s (30 s no nível Município); mais devagar se o TSE estiver limitando
+function liveInterval() {
+  const base = state.level === 'municipio' ? LIVE_MUN_MS : LIVE_MS;
+  return live.limited ? Math.max(base, 45000) : base;
+}
 function scheduleLive() {
   clearTimeout(live.timer);
+  live.wait = liveInterval();
+  // conta a partir do início da última rodada (a rodada em si leva ~13 s no ritmo do TSE)
   live.timer = setTimeout(async () => {
     if (document.visibilityState === 'visible') await liveTick(false);
     if (live.el) scheduleLive();
-  }, live.wait);
+  }, Math.max(1000, live.wait - (Date.now() - (live.tickStart || 0))));
 }
 function stopLive() {
   clearTimeout(live.timer);
-  live.timer = null; live.el = null;
+  live.timer = null; live.el = null; live.gen++;
+  tseClear();
   const b = $('#live-status'); if (b) b.hidden = true;
+}
+const livePP = v => { const d = new Map(v); return [d.get(S.pt) || 0, d.get(S.pl) || 0]; };
+function liveGov(g) {
+  return g && g.v.length && g.t[2] ? [g.cands[g.v[0][0]][2], (g.v[0][1] - (g.v[1] ? g.v[1][1] : 0)) / g.t[2], g.v[0][0]] : null;
+}
+// elemento de um município a partir do arquivo dele (votos) e do andamento da UF
+function munElem(id) {
+  const b = live.base.el[id], m = live.mun[id] || {}, ab = live.ab[id], P = live.prev.el || {};
+  const r = m.pres;
+  let apur = r ? r.secoes : null;
+  if (ab && (!apur || ab.st > apur[0])) apur = [ab.st, ab.ts];
+  return { n: b.n, uf: b.uf, ibge: b.ibge, t26: r ? r.t : null, t22: P[id] ? P[id].t26 : null,
+    p26: r ? livePP(r.v) : null, p22: P[id] ? P[id].p26 : null, g: liveGov(m.gov), apur,
+    comp: ab ? ab.c : null, pending: !r, at: m.at };
+}
+function munDetail(id) {
+  const m = live.mun[id], c = {};
+  if (m && m.pres) c[1] = { t: m.pres.t, v: m.pres.v };
+  if (m && m.gov) c[3] = { t: m.gov.t, v: m.gov.v };
+  return { c };
+}
+// busca um município (presidente e, onde há 2º turno, governador)
+async function liveMunFetch(id, prio) {
+  const el = live.el, b = live.base.el[id];
+  if (!el || !b) return;
+  const uf = b.uf, gen = live.gen;
+  const govOn = el.live.govUFs.includes(uf);
+  const [pres, gov] = await Promise.all([
+    liveFetch(el.live.pres, uf, 1, prio, id),
+    govOn && (prio === 0 || state.metric === 'gov') ? liveFetch(el.live.gov, uf, 3, prio, id) : null,
+  ]);
+  if (gen !== live.gen) return;
+  const m = live.mun[id] || (live.mun[id] = {});
+  if (pres) {
+    if (!pres.stale || !m.pres) live.munFetched++;
+    m.pres = pres; Object.assign(cand.br || (cand.br = {}), pres.cands);
+  }
+  if (gov) { m.gov = gov; cand[uf] = Object.assign(cand[uf] || {}, gov.cands); }
+  if (pres && !pres.stale) m.at = Date.now();
+  S.el[id] = munElem(id);
+  detailCache.set(id, Promise.resolve(munDetail(id)));
+  if (state.level === 'municipio') liveRedraw();
+}
+let liveRedrawT = null;
+function liveRedraw() {   // muitos municípios chegando: redesenha no máximo a cada 1,5 s
+  if (liveRedrawT) return;
+  liveRedrawT = setTimeout(() => { liveRedrawT = null; updateScale(); scheduleDraw(); renderLiveStatus(); }, 1500);
+}
+// andamento de todos os municípios: arquivo -ab.json de cada UF
+async function liveAb(gen) {
+  const el = live.el, ele = el.live.pres, E = String(ele).padStart(6, '0');
+  const ufs = Object.keys(live.base.uf).filter(u => u !== 'zz');
+  await Promise.all(ufs.map(async uf => {
+    const d = await tseGet(`https://resultados.tse.jus.br/oficial/ele2026/${ele}/dados/${uf}/${uf}-e${E}-ab.json`, 2);
+    if (!d || gen !== live.gen) return;
+    for (const a of d.abr || []) {
+      if (a.tpabr !== 'mun' || !live.base.el[a.cdabr]) continue;
+      live.ab[a.cdabr] = { st: +a.s.st || 0, ts: +a.s.ts || 0, c: +(a.e && a.e.c) || 0, te: +(a.e && a.e.te) || 0 };
+      S.el[a.cdabr] = munElem(a.cdabr);
+    }
+  }));
+  if (gen === live.gen) live.abAt = Date.now();
+}
+// próximos municípios a buscar: os visíveis na tela primeiro, depois os que andaram desde a
+// última busca, depois os maiores
+function munQueue() {
+  const t = state.transform, W = canvas.clientWidth, H = canvas.clientHeight;
+  const vx0 = -t.x / t.k, vy0 = -t.y / t.k, vx1 = (W - t.x) / t.k, vy1 = (H - t.y) / t.k;
+  const ufSec = {};
+  for (const uf of Object.keys(live.base.uf)) { const e = S.el[uf]; ufSec[uf] = e && e.apur ? e.apur[0] : 0; }
+  const now = Date.now(), out = [];
+  for (const g of geo.municipio) {
+    const b = live.base.el[g.id];
+    if (!b || g.id === 'zz') continue;
+    const m = live.mun[g.id], ab = live.ab[g.id], have = m && m.pres ? m.pres.secoes : null;
+    if (have && have[1] && have[0] >= have[1]) continue;              // apuração do município terminou
+    let need = 0;
+    if (ab && ab.st > (have ? have[0] : 0)) need = 2;                  // andou desde a última busca
+    else if (ufSec[b.uf] > 0 && (!m || !m.at || now - m.at > MUN_STALE)) need = 1;
+    if (!need) continue;
+    const bb = g.bbox, vis = !(bb[2] < vx0 || bb[0] > vx1 || bb[3] < vy0 || bb[1] > vy1);
+    out.push([g.id, (vis ? 4 : 0) + need, b.t26 ? b.t26[0] : 0]);
+  }
+  out.sort((a, b) => b[1] - a[1] || b[2] - a[2]);
+  return out.map(x => x[0]);
+}
+// laço dos municípios: só roda no nível Município, com no máximo 3 pedidos na fila
+async function munLoop(gen) {
+  while (gen === live.gen) {
+    if (state.level !== 'municipio' || document.visibilityState !== 'visible') { await sleep(1000); continue; }
+    if (Date.now() - live.abAt > AB_MS) { live.abAt = Date.now(); liveAb(gen); }
+    if (live.munBusy >= 3) { await sleep(250); continue; }
+    const next = munQueue().filter(id => !live.mun[id] || !live.mun[id].busy)[0];
+    if (!next) { await sleep(3000); continue; }
+    const m = live.mun[next] || (live.mun[next] = {});
+    m.busy = true; live.munBusy++;
+    liveMunFetch(next, 3).finally(() => { m.busy = false; m.at = m.at || Date.now(); live.munBusy--; });
+  }
 }
 async function liveTick(first) {
   if (live.busy || !live.el) return;
-  live.busy = true;
+  live.busy = true; live.tickStart = Date.now();
   const el = live.el, ufs = Object.keys(live.base.uf);   // inclui 'zz' (exterior)
   try {
     live.limited = false;
-    const pres = await pooled(ufs, 4, uf => liveFetch(el.live.pres, uf, 1));
-    // UFs que nunca responderam: mais uma tentativa, uma por vez
-    for (let i = 0; i < ufs.length; i++) {
-      if (pres[i]) continue;
-      await new Promise(r => setTimeout(r, 800));
-      pres[i] = await liveFetch(el.live.pres, ufs[i], 1);
-    }
-    const gov = await pooled(el.live.govUFs, 3, uf => liveFetch(el.live.gov, uf, 3));
-    live.wait = live.limited ? Math.min(60000, live.wait * 2) : LIVE_MS;
+    // governador muda o mapa só no modo Governador: busca a cada 4 rodadas nos outros modos
+    live.govN = (live.govN || 0) + 1;
+    const govNow = first || state.metric === 'gov' || live.govN % 4 === 0;
+    const sel = state.selected;
+    const selMun = typeof sel === 'string' && live.base.el[sel] && sel.length === 5 && !live.base.el[sel].muns;
+    const [pres, gov] = await Promise.all([
+      Promise.all(ufs.map(uf => liveFetch(el.live.pres, uf, 1))),
+      Promise.all(el.live.govUFs.map(uf => govNow || !live.cache[`${el.live.gov}/${uf}`]
+        ? liveFetch(el.live.gov, uf, 3, 2) : { ...live.cache[`${el.live.gov}/${uf}`], stale: false })),
+      selMun ? liveMunFetch(sel, 0) : null,   // município aberto no painel
+    ]);
     if (live.el !== el) return;
     const elx = {}, sq = {};
     let pt = null, pl = null;
@@ -420,7 +553,7 @@ async function liveTick(first) {
         cand[uf] = g.cands;
         c[3] = { t: g.t, v: g.v };
         const base = g.t[2] + g.t[5];
-        if (g.v.length && g.t[2]) gs = [g.cands[g.v[0][0]][2], (g.v[0][1] - (g.v[1] ? g.v[1][1] : 0)) / g.t[2], g.v[0][0]];
+        gs = liveGov(g);
         for (const [k, v] of g.v) govList.push([k, v, base ? Math.round(10000 * v / base) / 100 : 0, uf]);
       }
       elx[uf] = mk(uf, live.base.uf[uf], uf, r.t, r.v, gs, r.secoes);
@@ -431,6 +564,16 @@ async function liveTick(first) {
     if (govList.length) brc[3] = { v: govList, list: true };
     detailCache.set('br', Promise.resolve({ c: brc }));
     S = { el: elx, uf: live.base.uf, pt, pl, meta: { ano: 2026, turno: 2, live: true } };
+    // municípios já buscados (ou com andamento) continuam no mapa
+    for (const id of new Set([...Object.keys(live.mun), ...Object.keys(live.ab)])) {
+      const m = live.mun[id];
+      if (m && m.pres) {
+        Object.assign(cand.br, m.pres.cands);
+        if (m.gov) { const u = live.base.el[id].uf; cand[u] = Object.assign(cand[u] || {}, m.gov.cands); }
+        detailCache.set(id, Promise.resolve(munDetail(id)));
+      }
+      elx[id] = munElem(id);
+    }
     live.last = { hora, sec, ok: pres.filter(r => r && !r.stale).length, stale: pres.filter(r => r && r.stale).length,
       missing: pres.filter(r => !r).length, n: ufs.length };
     live.fetchedAt = new Date();
@@ -452,9 +595,16 @@ function renderLiveStatus() {
   const notes = [];
   if (stale) notes.push(`${stale} UF(s) com o dado anterior`);
   if (missing) notes.push(`${missing} UF(s) ainda sem dados`);
-  const every = live.wait > LIVE_MS ? `TSE limitando acessos: a cada ${Math.round(live.wait / 1000)} s` : 'a cada 15 s';
+  const secs = Math.round(live.wait / 1000);
+  const every = live.limited ? `TSE limitando acessos: estados a cada ${secs} s` : `estados a cada ${secs} s`;
+  let mun = '';
+  if (state.level === 'municipio') {
+    const tot = geo.municipio.filter(g => g.id !== 'zz').length;
+    const got = Object.values(live.mun).filter(m => m.pres).length;
+    mun = `<small>Municípios: ${fmtInt.format(got)} de ${fmtInt.format(tot)} com votos carregados · atualizados aos poucos (os visíveis na tela primeiro) · clique para atualizar um na hora</small>`;
+  }
   b.innerHTML = `<span class="live-dot"></span><b>AO VIVO</b> · ${fmtPct(pct, 2)} das seções apuradas
-    <small>Dados do TSE de ${esc(hora)} · buscados às ${at} (Brasília) · ${every}${notes.length ? ' · ' + notes.join(' · ') : ''}</small>`;
+    <small>Dados do TSE de ${esc(hora)} · buscados às ${at} (Brasília) · ${every}${notes.length ? ' · ' + notes.join(' · ') : ''}</small>${mun}`;
   b.hidden = false;
 }
 async function refreshPanel() {
@@ -964,6 +1114,7 @@ function hideTooltip() { tip.hidden = true; }
 function metricText(e) {
   const m = METRIC[state.metric];
   if (!e) return 'Sem dados';
+  if (e.pending && m.kind !== 'prog') return e.apur && !e.apur[0] ? 'Nenhuma seção apurada ainda' : 'Votos ainda não carregados · clique para buscar agora';
   if (m.kind === 'gov') {
     if (!e.g) return 'Sem dados';
     return `<b style="color:${partyColor(e.g[0])}">${esc(e.g[0])}</b> · margem ${fmtPct(e.g[1], 1)}`;
@@ -972,7 +1123,7 @@ function metricText(e) {
   if (v == null || !isFinite(v)) return m.diff ? (state.level === 'secao' ? 'Sem comparação por seção' : prevYear() ? `Sem dados de ${prevYear()}` : 'Sem eleição anterior para comparar') : 'Sem dados';
   switch (m.kind) {
     case 'abs': return `<b>${fmtInt.format(v)}</b>`;
-    case 'prog': return `<b>${fmtPct(v, 2)}</b> das seções apuradas · <b>${fmtInt.format(e.t26 ? e.t26[1] : 0)}</b> votos apurados`;
+    case 'prog': return `<b>${fmtPct(v, 2)}</b> das seções apuradas · <b>${fmtInt.format(e.t26 ? e.t26[1] : e.comp || 0)}</b> votos apurados`;
     case 'pct': return `<b>${fmtPct(v)}</b>`;
     case 'rel': return `<b>${fmtPP(v, 2)}%</b>`;
     case 'pp': return `<b>${fmtPP(v, 2)} p.p.</b>`;
@@ -1085,6 +1236,7 @@ async function setLevel(lv) {
     locais.colors = null;
   }
   syncMapmodes(); updateScale(); draw();
+  if (live.el) { scheduleLive(); renderLiveStatus(); }
 }
 
 function setupUI() {
@@ -1242,6 +1394,12 @@ async function openPanel(id) {
     const secTxt = Object.entries(byZone).map(([z, ss]) => `Zona ${z}: ${ss.length > 1 ? 'seções' : 'seção'} ${ss.join(', ')}`).join(' · ');
     pc = { id, kind: 'local', uf: inf.uf, detail: { c }, tabs: [1, 3, 5].filter(cg => c[cg]), muns: secTxt };
    } else {
+    if (elec().live && live.base && live.base.el[id] && /^\d{5}$/.test(id)) {
+      $('#panel-sub').textContent = 'Município · buscando no TSE…';
+      $('#panel-title').textContent = titleCase(live.base.el[id].n);
+      await liveMunFetch(id, 0);
+      if (state.selected !== id) return;
+    }
     const e = S.el[id];
     const detail = await loadDetail(id);
     const uf = id === 'br' ? null : e.uf;

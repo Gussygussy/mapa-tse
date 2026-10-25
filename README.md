@@ -4,7 +4,11 @@ Mapa interativo (modo escuro) dos resultados das **eleições gerais de 2018, 20
 
 - **Eleições** (abas no topo): 2018 1º e 2º turno, 2022 1º e 2º turno, 2026 1º turno. As métricas de variação comparam com o mesmo turno da eleição anterior (2022 × 2018, 2026 × 2022). No mapa de presidente, o PT é comparado com o partido de Bolsonaro/direita em cada eleição (PSL em 2018, PL em 2022 e 2026).
 
-- **2026 2º turno, ao vivo:** durante a apuração, os dados vêm do site de resultados do TSE a cada 15 s (o intervalo aumenta até 60 s se o TSE recusar acessos). O total de cada estado vem do arquivo da UF, e o total do Brasil é a soma dos estados com o exterior, sem esperar o arquivo nacional. Um selo no canto superior direito mostra o andamento, o horário dos dados do TSE e a hora da última busca. O modo de mapa *Apuração* (só nesse modo) mostra o % de seções apuradas em cada estado. Enquanto a apuração durar, só os níveis País e Estado ficam disponíveis.
+- **2026 2º turno, ao vivo:** durante a apuração, os dados vêm do site de resultados do TSE. O total de cada estado vem do arquivo da UF, e o total do Brasil é a soma dos estados com o exterior, sem esperar o arquivo nacional. O TSE aceita cerca de 2,5 pedidos por segundo por visitante, então todos os pedidos passam por uma fila (2,2/s) com prioridade: município clicado, estados, andamento e governador, municípios em segundo plano.
+  - Estados: a cada 15 s (30 s no nível Município, para sobrar acesso para os municípios).
+  - Municípios: um arquivo cada, buscados aos poucos — os visíveis na tela primeiro, depois os que tiveram seções apuradas desde a última busca (pelo arquivo de andamento de cada UF, lido a cada 2 min), depois os maiores. Clicar em um município busca os dados dele na hora, e o painel aberto se atualiza a cada rodada.
+  - Um selo no canto superior direito mostra o andamento, o horário dos dados do TSE, a hora da última busca e quantos municípios já têm votos carregados. O modo de mapa *Apuração* (só nesse modo) mostra o % de seções apuradas.
+  - Zona e Seção ficam desligados até o fim da apuração.
 - **Níveis:** País, Estado, Município, Zona eleitoral e Seção.
   - Zona: o TSE não publica o desenho das zonas, então a área de cada zona é aproximada (polígonos de Voronoi dos locais de votação, recortados pelos limites dos municípios).
   - Seção: um ponto por prédio de votação. Seções no mesmo local ficam agrupadas, assim como locais com o mesmo nome no mesmo município a até 300 m (no exterior, mesmo nome ou endereço na mesma cidade).
