@@ -121,7 +121,7 @@ const ICONS = {
 
 // ------------------------------------------------------------------ estado
 const state = {
-  election: '2026-1',
+  election: '2026-2',
   level: 'estado',
   metric: 'pres',
   selected: null,      // id do elemento selecionado
@@ -1210,14 +1210,18 @@ function setupMapmodesCollapse() {
 function syncMapmodes() {
   document.querySelectorAll('.mm-group-label[data-live-only]').forEach(l => { l.hidden = !elec().live; });
   if (METRIC[state.metric].liveOnly && !elec().live) state.metric = 'pres';
+  // seções sem votos por candidato publicados (2º turno de 2026, por enquanto): só participação
+  const semVotos = m => state.level === 'secao' && S && S.meta && S.meta.secoesSemVotos && ['pres', 'dpres', 'gov'].includes(m.kind);
+  if (semVotos(METRIC[state.metric])) { state.metric = 'pvot'; if (locais) locais.colors = null; }
   document.querySelectorAll('.mm-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.metric === state.metric);
     const m = METRIC[b.dataset.metric];
     b.hidden = !!m.liveOnly && !elec().live;
     // variações: sem eleição anterior (2018) ou no nível Seção (a numeração das seções muda)
     const noPrev = m.diff && !prevYear();
-    b.disabled = m.diff && (state.level === 'secao' || noPrev);
-    b.title = metricName(m) + (noPrev ? ' (sem eleição anterior para comparar)' : b.disabled ? ' (sem comparação por seção)' : '');
+    b.disabled = (m.diff && (state.level === 'secao' || noPrev)) || semVotos(m);
+    b.title = metricName(m) + (noPrev ? ' (sem eleição anterior para comparar)' : semVotos(m) ? ' (o TSE ainda não publicou os votos por seção)'
+      : b.disabled ? ' (sem comparação por seção)' : '');
     b.setAttribute('aria-label', b.title);
   });
 }

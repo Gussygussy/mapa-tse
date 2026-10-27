@@ -146,7 +146,7 @@ def put(key, name, uf, c, extra=None):
     c1 = c['1']
     d = dict(c1['v'])
     p = prev.get(key, {})
-    g = gov_summary({**c['3'], 'uf': uf}) if '3' in c else None
+    g = gov_summary({**c['3'], 'uf': uf}) if '3' in c and not c['3'].get('list') else None
     summary[key] = {'n': name, 'uf': uf, 't26': c1['t'], 't22': p.get('t26'),
                     'p26': [d.get(PT, 0), d.get(PL, 0)], 'p22': p.get('p26'), 'g': g}
     if extra:

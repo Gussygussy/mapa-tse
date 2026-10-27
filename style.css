@@ -282,3 +282,6 @@ body.panel-open .attribution { right: 448px; }
   .mapmodes { width: auto; left: 16px; right: 16px; bottom: 16px; }
   .levels button { padding: 7px 10px; }
 }
+
+/* botões de modo só do ao vivo: o display do botão não pode vencer o atributo hidden */
+.mm-grid [hidden] { display: none !important; }
