@@ -56,9 +56,9 @@ const ELECTIONS = [
   { id: '2022-1', label: '2022 · 1º turno', short: '2022 1º', ano: 2022, turno: 1, prev: '2018-1', right: 'PL', fotoCod: '2040602022' },
   { id: '2022-2', label: '2022 · 2º turno', short: '2022 2º', ano: 2022, turno: 2, prev: '2018-2', right: 'PL', fotoCod: '2040602022' },
   { id: '2026-1', label: '2026 · 1º turno', short: '2026 1º', ano: 2026, turno: 1, prev: '2022-1', right: 'PL' },
-  // 2º turno de 2026: ao vivo, lido direto da API de resultados do TSE (ver "ao vivo" abaixo)
-  { id: '2026-2', label: '2026 · 2º turno', short: '2026 2º', ano: 2026, turno: 2, prev: '2022-2', right: 'PL',
-    live: { pres: 6258, gov: 6260, govUFs: ['ac', 'am', 'df', 'es', 'rn', 'to'], base: '2026-1' } },
+  { id: '2026-2', label: '2026 · 2º turno', short: '2026 2º', ano: 2026, turno: 2, prev: '2022-2', right: 'PL' },
+  // para acompanhar uma apuração ao vivo (API de resultados do TSE), acrescente à eleição:
+  //   live: { pres: <código da eleição de presidente>, gov: <governador>, govUFs: [...], base: '<eleição com a estrutura>' }
 ];
 const EL = id => ELECTIONS.find(e => e.id === id);
 const elec = () => EL(state.election);
@@ -1114,6 +1114,8 @@ function hideTooltip() { tip.hidden = true; }
 function metricText(e) {
   const m = METRIC[state.metric];
   if (!e) return 'Sem dados';
+  if (state.level === 'secao' && S.meta && S.meta.secoesSemVotos && ['pres', 'dpres', 'gov'].includes(m.kind))
+    return 'Votos por candidato nas seções: o TSE ainda não publicou';
   if (e.pending && m.kind !== 'prog') return e.apur && !e.apur[0] ? 'Nenhuma seção apurada ainda' : 'Votos ainda não carregados · clique para buscar agora';
   if (m.kind === 'gov') {
     if (!e.g) return 'Sem dados';
@@ -1503,7 +1505,9 @@ function renderCandList() {
   const titleExtra = pc.kind === 'pais' && panelState.tab !== 1
     ? (elec().turno === 2 ? ' no 2º turno, por UF' : ' eleitos ou no 2º turno, por UF') : '';
   let html = `<div class="count">${fmtInt.format(filtered.length)} de ${fmtInt.format(list.length)} candidatos${titleExtra}</div>`;
-  if (!filtered.length) html += `<div class="empty">${q ? 'Nenhum candidato encontrado.' : 'Nenhum candidato com os filtros atuais.'}</div>`;
+  if (!list.length && pc.kind === 'local' && S.meta && S.meta.secoesSemVotos)
+    html = `<div class="empty">O TSE ainda não publicou os votos por candidato em cada seção do 2º turno. Por enquanto, só os totais (comparecimento, brancos e nulos).</div>`;
+  else if (!filtered.length) html += `<div class="empty">${q ? 'Nenhum candidato encontrado.' : 'Nenhum candidato com os filtros atuais.'}</div>`;
   html += filtered.slice(0, panelState.shown).map(c => candCard(c, pc)).join('');
   if (filtered.length > panelState.shown) html += `<button class="show-more" data-act="more">Mostrar mais (${fmtInt.format(filtered.length - panelState.shown)} restantes)</button>`;
   $('#cand-list').innerHTML = html;
@@ -1536,7 +1540,8 @@ function eleitoradoCard(t) {
 function photoUrl(sq, cargo, uf) {
   const e = elec();
   if (e.ano === 2026) {
-    const ele = e.live ? (cargo === 1 ? e.live.pres : e.live.gov) : (cargo === 1 ? 6257 : 6259);
+    const ele = e.live ? (cargo === 1 ? e.live.pres : e.live.gov)
+      : e.turno === 2 ? (cargo === 1 ? 6258 : 6260) : (cargo === 1 ? 6257 : 6259);
     return `https://resultados.tse.jus.br/oficial/ele2026/${ele}/fotos/${cargo === 1 ? 'br' : uf}/${sq}.jpeg`;
   }
   // eleições anteriores: fotos do DivulgaCandContas (se não carregar, aparecem as iniciais)
